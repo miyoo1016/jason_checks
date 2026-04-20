@@ -8,6 +8,7 @@ function timaApp() {
         // State
         themes: {},
         stocks: {},
+        indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
         wsConnected: false,
         mode: 'paper',
         currentTime: new Date().toLocaleTimeString('ko-KR'),
@@ -16,6 +17,7 @@ function timaApp() {
         sortMode: 'strength',
         surges: [],
         surgeSortMode: 'change_pct',
+        sessionType: 'closed',  // 'pre' | 'regular' | 'after' | 'closed'
 
         // Methods
         async init() {
@@ -31,15 +33,46 @@ function timaApp() {
             // Load initial theme data
             await this.loadThemes();
             await this.loadSurges();
+            await this.loadIndices();
 
             // Connect WebSocket
             this.connectWebSocket();
+
+            this.updateSessionType();
+            setInterval(() => this.updateSessionType(), 30000);
 
             // Refresh data every 500ms
             setInterval(() => {
                 this.loadThemes();
                 this.loadSurges();
             }, 500);
+            // Indices refresh every 3s (backend polls every 5s)
+            setInterval(() => this.loadIndices(), 3000);
+        },
+
+        async loadIndices() {
+            try {
+                const res = await fetch('/api/indices');
+                const data = await res.json();
+                if (data.indices) this.indices = data.indices;
+            } catch (e) {
+                console.error('Failed to load indices:', e);
+            }
+        },
+
+        formatTrend(amount) {
+            // Amount in 원 (can be negative). Output examples: "+10억", "-3억", "+5,200만", "0"
+            const n = Number(amount) || 0;
+            if (n === 0) return '0';
+            const sign = n > 0 ? '+' : '-';
+            const abs = Math.abs(n);
+            if (abs >= 100000000) {
+                return `${sign}${Math.round(abs / 100000000)}억`;
+            }
+            if (abs >= 10000) {
+                return `${sign}${Math.round(abs / 10000)}만`;
+            }
+            return `${sign}${abs}`;
         },
 
         loadPinnedThemes() {
@@ -128,6 +161,17 @@ function timaApp() {
             const date = now.toLocaleDateString('ko-KR');
             const time = now.toLocaleTimeString('ko-KR');
             this.currentTime = `${date} ${time}`;
+        },
+
+        updateSessionType() {
+            const now = new Date();
+            const dow = now.getDay();
+            if (dow === 0 || dow === 6) { this.sessionType = 'closed'; return; }
+            const mins = now.getHours() * 100 + now.getMinutes();
+            if (mins >= 800 && mins < 850) this.sessionType = 'pre';
+            else if (mins >= 900 && mins <= 1530) this.sessionType = 'regular';
+            else if (mins > 1530 && mins < 2000) this.sessionType = 'after';
+            else this.sessionType = 'closed';
         },
 
         async loadThemes() {

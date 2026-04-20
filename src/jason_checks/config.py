@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 from typing import Literal
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -11,20 +11,17 @@ class Settings(BaseSettings):
 
     kis_mode: Literal["paper", "live"] = "paper"
 
-    # Paper (mock) credentials
+    # API credentials (will be used for whichever mode is active)
     kis_app_key: str = ""
     kis_app_secret: str = ""
     kis_account_no: str = ""
 
-    # Live (production) credentials (optional)
-    kis_app_key_live: str = ""
-    kis_app_secret_live: str = ""
-    kis_account_no_live: str = ""
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
 
 
 def get_settings() -> Settings:
@@ -50,7 +47,7 @@ def get_urls(mode: Literal["paper", "live"] = "paper") -> tuple[str, str]:
     else:  # live
         return (
             "https://openapi.koreainvestment.com:9443",
-            "ws://ops.koreainvestment.com:31000"
+            "ws://ops.koreainvestment.com:21000"
         )
 
 
@@ -63,18 +60,12 @@ def get_active_credentials() -> tuple[str, str, str]:
     """
     settings = get_settings()
 
-    if settings.kis_mode == "paper":
-        return (
-            settings.kis_app_key,
-            settings.kis_app_secret,
-            settings.kis_account_no
-        )
-    else:
-        return (
-            settings.kis_app_key_live,
-            settings.kis_app_secret_live,
-            settings.kis_account_no_live
-        )
+    # Simple mapping: always use the same keys from .env
+    return (
+        settings.kis_app_key,
+        settings.kis_app_secret,
+        settings.kis_account_no
+    )
 
 
 if __name__ == "__main__":

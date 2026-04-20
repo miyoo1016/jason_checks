@@ -9,21 +9,21 @@
     --color-down: #1A5CDD;    /* Korean blue for price down */
     --color-neutral: #71717A;
     
-    /* Backgrounds (Claude Beige Palette) */
-    --bg-primary: #F9F7F2;    /* Main beige background */
+    /* Backgrounds (Professional High-Contrast Palette) */
+    --bg-primary: #F8FAFC;    /* Clean cool gray background */
     --bg-secondary: #FFFFFF;  /* Card background */
-    --bg-tertiary: #F1EFE9;   /* Hover/Section background */
+    --bg-tertiary: #F1F5F9;   /* Hover/Section background */
     
     /* Text */
-    --text-primary: #1A1A1A;  /* Deep charcoal */
-    --text-secondary: #666666; /* Muted gray */
-    --text-muted: #8E8E93;
+    --text-primary: #0F172A;  /* Slate 900 for maximum readability */
+    --text-secondary: #475569; /* Slate 600 */
+    --text-muted: #94A3B8;
     
     /* UI Elements */
-    --border-light: #E8E4D8;  /* Subtle beige border */
-    --border-medium: #D1CDC2;
-    --accent: #D97706;        /* Premium Amber/Gold */
-    --accent-light: #FEF3C7;
+    --border-light: #E2E8F0;  /* Subtle slate border */
+    --border-medium: #CBD5E1;
+    --accent: #2563EB;        /* Primary Blue Accent */
+    --accent-light: #DBEAFE;
     
     /* Shadows */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);

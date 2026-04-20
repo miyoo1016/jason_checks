@@ -26,10 +26,76 @@ from jason_checks.theme_ranker import (
     build_code_to_theme_map,
 )
 from jason_checks.kis_ws import get_ws
+from jason_checks.kis_rest import (
+    fetch_market_indices,
+    fetch_stock_investor_trend,
+    fetch_index_investor_trend,
+)
 
 # Initialize logging
 setup_logging()
 logger = structlog.get_logger()
+
+
+async def _market_indices_loop():
+    """Poll KOSPI/KOSDAQ index prices every 5s."""
+    while True:
+        try:
+            data = await fetch_market_indices()
+            for code, info in data.items():
+                app_state.update_index(
+                    code,
+                    name=info["name"],
+                    price=info["price"],
+                    change_pct=info["change_pct"],
+                    change_value=info["change_value"],
+                )
+        except Exception as e:
+            logger.warning("market_indices_loop_error", error=str(e))
+        await asyncio.sleep(5)
+
+
+async def _index_investor_loop():
+    """Poll KOSPI/KOSDAQ investor trend every 10s."""
+    while True:
+        try:
+            for code in ("0001", "1001"):
+                tr = await fetch_index_investor_trend(code)
+                app_state.update_index(
+                    code,
+                    investor_foreigner=tr["foreigner"],
+                    investor_institution=tr["institution"],
+                    investor_individual=tr["individual"],
+                )
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.warning("index_investor_loop_error", error=str(e))
+        await asyncio.sleep(10)
+
+
+async def _stock_investor_loop(app):
+    """Poll per-stock investor trend every 30s for active grid stocks only."""
+    while True:
+        try:
+            # 활성 4개 테마의 리더 종목만 (과다한 호출 방지)
+            active_themes = list(getattr(app, "theme_data", {}).keys())[:4]
+            codes: list[str] = []
+            for tc in active_themes:
+                stocks = app.theme_data.get(tc, {}).get("stocks", [])[:4]
+                codes.extend(s["code"] for s in stocks)
+            # 최대 16개 한정
+            for code in codes[:16]:
+                tr = await fetch_stock_investor_trend(code)
+                app_state.update_stock(
+                    code,
+                    investor_foreigner=tr["foreigner"],
+                    investor_institution=tr["institution"],
+                    investor_individual=tr["individual"],
+                )
+                await asyncio.sleep(0.2)
+        except Exception as e:
+            logger.warning("stock_investor_loop_error", error=str(e))
+        await asyncio.sleep(30)
 
 
 def create_app() -> FastAPI:
@@ -74,6 +140,12 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error("startup_failed", error=str(e))
 
+        # Background: market indices every 5s
+        asyncio.create_task(_market_indices_loop())
+        # Background: investor trends every 30s (stocks) and 10s (indices)
+        asyncio.create_task(_index_investor_loop())
+        asyncio.create_task(_stock_investor_loop(app))
+
     # Shutdown event
     @app.on_event("shutdown")
     async def shutdown():
@@ -109,32 +181,19 @@ def create_app() -> FastAPI:
 
     @app.get("/api/themes")
     async def get_themes(sort: str = "strength", pinned: str = ""):
-        """Get current theme state with top 4 stocks each (dynamically ranked).
-
-        Args:
-            sort: Sorting mode - "strength" | "change_pct" | "trading_value"
-            pinned: Comma-separated theme codes to pin (always included)
-        """
+        """Get current theme state with top 4 stocks each (dynamically ranked)."""
         if not app.theme_data:
             return {"themes": {}, "ws_connected": app_state.ws_connected}
 
-        # Validate sort mode
         if sort not in ("strength", "change_pct", "trading_value"):
             sort = "strength"
 
-        # Parse pinned themes
         pinned_list = [p for p in pinned.split(",") if p.strip()]
-
-        # Rank themes dynamically (pinned first, then top 4)
         active_themes = rank_themes(app.theme_data, top_n=4, pinned=pinned_list)
 
-        # Re-subscribe WebSocket to active theme stocks (background task)
-        active_codes = get_expanded_subscription_codes(
-            app.theme_data, active_themes, max_codes=40
-        )
+        active_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=40)
         asyncio.create_task(get_ws().resubscribe(active_codes))
 
-        # Build current tick dict from app_state
         stock_ticks = {}
         for code, stock in app_state.stocks.items():
             stock_ticks[code] = {
@@ -144,9 +203,44 @@ def create_app() -> FastAPI:
                 "cumulative_trading_value": stock.cumulative_trading_value,
                 "strength": stock.execution_strength,
                 "timestamp": stock.last_tick_ts.strftime("%H%M%S"),
+                "investor_foreigner": stock.investor_foreigner,
+                "investor_institution": stock.investor_institution,
+                "investor_individual": stock.investor_individual,
             }
 
-        # Build response ONLY for active themes
+        # Data Supplement: If any active grid stock is missing data, fetch it using standard API
+        from jason_checks.kis_rest import fetch_current_price
+        now_ts = datetime.now()
+        for theme_code in active_themes:
+            theme_stocks = app.theme_data.get(theme_code, {}).get("stocks", [])
+            for stock in theme_stocks[:4]:
+                code = stock["code"]
+                if code not in stock_ticks or stock_ticks[code].get("price", 0) == 0:
+                    try:
+                        await asyncio.sleep(0.1) # Avoid rate limit
+                        data = await fetch_current_price(code)
+                        if data:
+                            stock_ticks[code] = {
+                                "price": data["price"],
+                                "change_pct": data["change_pct"],
+                                "cumulative_volume": data["volume"],
+                                "cumulative_trading_value": data.get("trading_value", 0),
+                                "strength": 100.0,
+                                "timestamp": now_ts.strftime("%H%M%S"),
+                                "investor_foreigner": 0,
+                                "investor_institution": 0,
+                                "investor_individual": 0,
+                            }
+                            # Update app_state so it persists
+                            app_state.update_stock(
+                                code,
+                                price=data["price"],
+                                change_pct=data["change_pct"],
+                                cumulative_trading_value=data.get("trading_value", 0),
+                            )
+                    except Exception as e:
+                        logger.error("individual_fallback_failed", code=code, error=str(e))
+
         themes_result = {}
         for theme_code in active_themes:
             theme_config = app.theme_data.get(theme_code, {})
@@ -154,14 +248,9 @@ def create_app() -> FastAPI:
             strength = compute_theme_strength(leaders, sort_mode=sort)
             avg_change_pct = compute_theme_avg_change_pct(leaders)
 
-            # Build leader list with full tick data
             leader_list = []
             for leader in leaders:
-                leader_dict = {
-                    "code": leader["code"],
-                    "name": leader["name"],
-                    "score": leader["score"],
-                }
+                leader_dict = {"code": leader["code"], "name": leader["name"], "score": leader["score"]}
                 if leader["code"] in stock_ticks:
                     leader_dict.update(stock_ticks[leader["code"]])
                 leader_list.append(leader_dict)
@@ -180,87 +269,39 @@ def create_app() -> FastAPI:
             "mode": get_settings().kis_mode,
         }
 
-    # Cache for active leader codes to avoid redundant calculation across multiple client requests
     _active_leaders_cache = {"codes": set(), "updated_at": None}
-    _LEADERS_CACHE_TTL = 1.5  # seconds
+    _LEADERS_CACHE_TTL = 1.5
 
     @app.get("/api/surges")
     async def get_surges(sort: str = "change_pct", limit: int = 10):
-        """Return top N individual surge stocks NOT in the active theme grid."""
-        from jason_checks.kis_rest import (
-            fetch_top_movers_cached,
-            filter_non_theme_stocks,
+        """Return top N individual surge stocks (NXT-aware)."""
+        from jason_checks.kis_rest import fetch_top_movers_cached, filter_non_theme_stocks
+
+        now = datetime.now()
+        current_min = now.hour * 100 + now.minute
+        is_market_closed = not (900 <= current_min <= 1530)  # KRX 정규장 종료
+        is_nxt_hour = now.weekday() < 5 and (
+            (800 <= current_min < 850) or (1530 <= current_min < 2000)
         )
 
-        if sort not in ("change_pct", "strength", "trading_value"):
-            sort = "change_pct"
-        limit = max(1, min(limit, 30))
-
-        # Step 1: Get active leader codes (with 1.5s cache)
-        now = datetime.now()
-        if (
-            not _active_leaders_cache["updated_at"]
-            or (now - _active_leaders_cache["updated_at"]).total_seconds() > _LEADERS_CACHE_TTL
-        ):
-            active_leader_codes = set()
-            active_themes = rank_themes(app.theme_data, top_n=4, pinned=[])
-            
-            # Build minimal tick dict
-            stock_ticks = {
-                code: {
-                    "price": s.price,
-                    "change_pct": s.change_pct,
-                    "cumulative_trading_value": s.cumulative_trading_value,
-                    "strength": s.execution_strength,
-                }
-                for code, s in app_state.stocks.items()
-            }
-
-            for theme_code in active_themes:
-                leaders = select_leaders(
-                    theme_code, stock_ticks, app.theme_data, sort_mode="strength"
-                )
-                for leader in leaders:
-                    active_leader_codes.add(leader["code"])
-            
-            _active_leaders_cache["codes"] = active_leader_codes
-            _active_leaders_cache["updated_at"] = now
-        else:
-            active_leader_codes = _active_leaders_cache["codes"]
-
-        code_map = getattr(app, "code_theme_map", {})
+        active_leader_codes = _active_leaders_cache["codes"]
         settings = get_settings()
 
-        # Step 2: Try KIS REST API (ONLY in LIVE mode, skip in PAPER to avoid known 403 errors)
-        if settings.kis_mode == "live":
+        # 정규장 시간: top_movers (KRX 기준 등락률 순위)
+        if not is_market_closed and settings.kis_mode == "live":
             try:
-                rest_stocks = await fetch_top_movers_cached(
-                    market="J", sort="0", limit=50
-                )
+                rest_stocks = await fetch_top_movers_cached(market="J", sort="0", limit=50)
                 if rest_stocks:
                     filtered = [s for s in rest_stocks if s["code"] not in active_leader_codes]
-                    
-                    if sort == "change_pct":
-                        filtered.sort(key=lambda s: s.get("change_pct", 0), reverse=True)
-                    elif sort == "strength":
-                        filtered.sort(key=lambda s: s.get("strength", 0), reverse=True)
-                    elif sort == "trading_value":
-                        filtered.sort(key=lambda s: s.get("cumulative_trading_value", 0) or s.get("trading_value", 0), reverse=True)
-
-                    return {
-                        "surges": filtered[:limit],
-                        "sort": sort,
-                        "total_tracked": len(filtered),
-                        "source": "rest_api",
-                    }
+                    return {"surges": filtered[:limit], "sort": sort, "source": "rest_api"}
             except Exception as e:
                 logger.warning("rest_surge_failed", error=str(e))
 
-        # Step 3: Fallback (or Primary for Paper) — filter from WebSocket pool
+        # NXT 시간: WebSocket pool에서 가져오기 (ranking API가 NXT를 지원 안 함)
         fallback = filter_non_theme_stocks(
-            app_state.stocks, active_leader_codes, code_map
+            app_state.stocks, active_leader_codes, getattr(app, "code_theme_map", {})
         )
-
+        # Sort
         if sort == "change_pct":
             fallback.sort(key=lambda s: s.get("change_pct", 0), reverse=True)
         elif sort == "strength":
@@ -271,37 +312,39 @@ def create_app() -> FastAPI:
         return {
             "surges": fallback[:limit],
             "sort": sort,
-            "total_tracked": len(fallback),
             "source": "ws_pool",
+            "is_nxt": is_nxt_hour,
         }
 
+    @app.get("/api/indices")
+    async def get_indices():
+        """Return KOSPI/KOSDAQ snapshot with investor trends."""
+        result = {}
+        for code, idx in app_state.indices.items():
+            result[code] = {
+                "name": idx.name,
+                "price": idx.price,
+                "change_pct": idx.change_pct,
+                "change_value": idx.change_value,
+                "investor_foreigner": idx.investor_foreigner,
+                "investor_institution": idx.investor_institution,
+                "investor_individual": idx.investor_individual,
+            }
+        return {"indices": result}
 
-    # WebSocket endpoint
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for browser clients."""
         await websocket.accept()
         bridge = get_bridge()
         await bridge.add_client(websocket)
-
         try:
-            # Send initial state
             import json
-            initial = {
-                "type": "init",
-                "mode": get_settings().kis_mode,
-                "ws_connected": app_state.ws_connected,
-            }
-            await websocket.send_text(json.dumps(initial))
-
-            # Keep connection alive
+            await websocket.send_text(json.dumps({"type": "init", "mode": get_settings().kis_mode, "ws_connected": app_state.ws_connected}))
             while True:
-                msg = await websocket.receive_text()
-                logger.debug("ws_client_message", msg=msg[:50])
-
+                await websocket.receive_text()
         except WebSocketDisconnect:
             await bridge.remove_client(websocket)
-            logger.info("ws_client_disconnected")
         except Exception as e:
             logger.error("ws_error", error=str(e))
             await bridge.remove_client(websocket)

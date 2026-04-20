@@ -27,6 +27,8 @@ async def issue_approval_key() -> str:
     settings = get_settings()
     app_key, app_secret, _ = get_active_credentials()
     rest_url, _ = get_urls(settings.kis_mode)
+    # Reverting to rest_url (port 9443) as 443 is unreachable in this environment
+    auth_url = rest_url
 
     # Check cache
     if APPROVAL_KEY_CACHE_FILE.exists():
@@ -40,7 +42,7 @@ async def issue_approval_key() -> str:
             logger.warning("cache_read_failed", error=str(e))
 
     # Issue new key
-    endpoint = f"{rest_url}/oauth2/Approval"
+    endpoint = f"{auth_url}/oauth2/Approval"
     body = {
         "grant_type": "client_credentials",
         "appkey": app_key,
@@ -49,9 +51,15 @@ async def issue_approval_key() -> str:
     headers = {"content-type": "application/json; charset=utf-8"}
 
     async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(endpoint, headers=headers, json=body, timeout=10.0)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.post(endpoint, headers=headers, json=body, timeout=10.0)
+            if resp.status_code != 200:
+                logger.error("approval_key_request_failed", status=resp.status_code, text=resp.text)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error("approval_key_exception", error=str(e))
+            raise e
 
     approval_key = data.get("approval_key")
     if not approval_key:

@@ -35,28 +35,21 @@ class WSBridge:
         self.stream_task = asyncio.create_task(self._stream_loop(codes))
 
     async def _stream_loop(self, codes: list[str]) -> None:
-        """Stream KIS ticks and broadcast to all connected browsers with retry logic."""
+        """Stream KIS ticks and broadcast with proper retry backoff."""
         retry_delay = 1
         max_delay = 30
 
         while self.running:
+            stream_ok = False
             try:
                 logger.info("kis_connect_start")
                 await self.kis_ws.connect()
-                
-                # (Re)subscribe to all current codes
-                # Note: self.kis_ws.subscribed_codes should be cleared on connect if it's a new connection
-                # The KisWebSocket class handles this by being a singleton, but we should ensure 
-                # we subscribe to the latest set of codes.
                 await self.kis_ws.subscribe(codes)
                 app_state.ws_connected = True
                 logger.info("kis_connected")
-                
-                # Reset retry delay on successful connection
                 retry_delay = 1
 
                 async for tick in self.kis_ws.stream():
-                    # Update shared state
                     stock = app_state.get_or_create_stock(tick.code)
                     app_state.update_stock(
                         tick.code,
@@ -65,13 +58,12 @@ class WSBridge:
                         cum_volume_krw=tick.cumulative_volume,
                         cumulative_trading_value=tick.cumulative_trading_value,
                         execution_strength=tick.strength,
+                        market=tick.market,
                     )
 
-                    # Detect volume surge
                     update_volume_window(stock, tick)
                     surge_detected = detect_surge(stock)
 
-                    # Broadcast tick to all browsers
                     msg = {
                         "type": "tick",
                         "code": tick.code,
@@ -80,10 +72,10 @@ class WSBridge:
                         "cumulative_volume": tick.cumulative_volume,
                         "strength": tick.strength,
                         "timestamp": tick.timestamp,
+                        "market": tick.market,
                     }
                     await self._broadcast(json.dumps(msg))
 
-                    # Broadcast surge event if detected
                     if surge_detected:
                         surge_msg = {
                             "type": "surge",
@@ -94,19 +86,33 @@ class WSBridge:
                         }
                         await self._broadcast(json.dumps(surge_msg))
 
+                # async for exited without exception (stream broke cleanly)
+                stream_ok = True
+                logger.warning("kis_stream_ended_normally")
+
             except asyncio.CancelledError:
                 logger.info("stream_loop_cancelled")
+                app_state.ws_connected = False
                 break
             except Exception as e:
                 logger.error("stream_loop_error", error=str(e))
-                app_state.ws_connected = False
-                
-                if self.running:
-                    logger.info("kis_reconnect_waiting", seconds=retry_delay)
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, max_delay)
-            finally:
-                app_state.ws_connected = False
+
+            # Disconnected state
+            app_state.ws_connected = False
+            try:
+                await self.kis_ws.close()
+            except Exception:
+                pass
+
+            if not self.running:
+                break
+
+            # Backoff (even on normal end, to prevent server hammering)
+            wait = 3 if stream_ok else retry_delay
+            if not stream_ok:
+                retry_delay = min(retry_delay * 2, max_delay)
+            logger.info("kis_reconnect_waiting", seconds=wait)
+            await asyncio.sleep(wait)
 
     async def _broadcast(self, message: str) -> None:
         """Broadcast message to all connected clients."""

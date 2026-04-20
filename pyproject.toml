@@ -19,6 +19,8 @@ dependencies = [
     "PyYAML>=6.0",
     "python-dotenv>=1.0.0",
     "structlog>=23.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.optional-dependencies]

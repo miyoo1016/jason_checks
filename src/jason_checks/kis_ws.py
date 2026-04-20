@@ -11,6 +11,7 @@ KIS WebSocket protocol:
 
 import asyncio
 import json
+from datetime import datetime
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional, Callable
 import websockets
@@ -36,6 +37,7 @@ class ExecutionTick:
     strength: float             # 체결강도
     change_pct: float           # 전일 대비 등락률
     timestamp: str              # HHMMSS
+    market: str = "J"           # J=KRX, NX=Nextrade
 
 
 # H0STCNT0 field indices (KIS official spec)
@@ -75,7 +77,7 @@ def _parse_execution_tick(raw: str) -> Optional[ExecutionTick]:
         return None
 
     tr_id = parts[1]
-    if tr_id != "H0STCNT0":
+    if tr_id not in ("H0STCNT0", "H0STCNI0", "H0UNCNT0"):
         return None
 
     # parts[3] = caret-separated fields
@@ -106,6 +108,7 @@ def _parse_execution_tick(raw: str) -> Optional[ExecutionTick]:
             strength=strength,
             change_pct=change_pct,
             timestamp=timestamp,
+            market="NX" if tr_id == "H0UNCNT0" else "J"
         )
     except (ValueError, IndexError) as e:
         logger.warning("parse_tick_failed", error=str(e), raw=raw[:100])
@@ -134,14 +137,19 @@ class KisWebSocket:
 
         self.ws = await websockets.connect(
             ws_url,
-            ping_interval=None,  # KIS uses its own PINGPONG
+            ping_interval=20,
+            ping_timeout=10,
             close_timeout=5,
+            open_timeout=15,
         )
         self.connected = True
         logger.info("ws_connected", url=ws_url)
 
     async def subscribe(self, codes: list[str]) -> None:
-        """Subscribe to real-time execution ticks (H0STCNT0)."""
+        """Subscribe to real-time execution ticks.
+        
+        Sends BOTH H0STCNT0 (KRX standard) and H0UNCNT0 (unified/NXT) to cover all sessions.
+        """
         if not self.ws:
             raise RuntimeError("WebSocket not connected")
 
@@ -149,43 +157,67 @@ class KisWebSocket:
             if code in self.subscribed_codes:
                 continue
 
-            msg = {
+            # 1. Standard real-time (KRX regular hours: 09:00-15:30)
+            msg_std = {
                 "header": {
                     "approval_key": self.approval_key,
                     "custtype": "P",
-                    "tr_type": "1",  # 1=등록, 2=해제
+                    "tr_type": "1",
                     "content-type": "utf-8",
                 },
-                "body": {
-                    "input": {
-                        "tr_id": "H0STCNT0",
-                        "tr_key": code,
-                    }
-                },
+                "body": {"input": {"tr_id": "H0STCNT0", "tr_key": code}},
             }
-            await self.ws.send(json.dumps(msg))
+            try:
+                await self.ws.send(json.dumps(msg_std))
+                logger.info("ws_subscribed_std", code=code, tr_id="H0STCNT0")
+            except Exception as e:
+                logger.warning("ws_std_sub_failed", code=code, error=str(e))
+
+            await asyncio.sleep(0.05)
+
+            # 2. Unified/Nextrade real-time (covers NXT pre/after market)
+            # TR_ID candidates to try — H0UNCNT0 is the unified market tick
+            msg_unified = {
+                "header": {
+                    "approval_key": self.approval_key,
+                    "custtype": "P",
+                    "tr_type": "1",
+                    "content-type": "utf-8",
+                },
+                "body": {"input": {"tr_id": "H0UNCNT0", "tr_key": code}},
+            }
+            try:
+                await self.ws.send(json.dumps(msg_unified))
+                logger.info("ws_subscribed_unified", code=code, tr_id="H0UNCNT0")
+            except Exception as e:
+                logger.warning("ws_unified_sub_failed", code=code, error=str(e))
+
             self.subscribed_codes.add(code)
-            logger.info("ws_subscribed", code=code)
-            await asyncio.sleep(0.05)  # small throttle
+            await asyncio.sleep(0.05)
 
     async def unsubscribe(self, codes: list[str]) -> None:
-        """Unsubscribe from stocks."""
+        """Unsubscribe from stocks (both H0STCNT0 and H0UNCNT0)."""
         if not self.ws:
             return
         for code in codes:
             if code not in self.subscribed_codes:
                 continue
-            msg = {
-                "header": {
-                    "approval_key": self.approval_key,
-                    "custtype": "P",
-                    "tr_type": "2",
-                    "content-type": "utf-8",
-                },
-                "body": {"input": {"tr_id": "H0STCNT0", "tr_key": code}},
-            }
-            await self.ws.send(json.dumps(msg))
+            for tr_id in ("H0STCNT0", "H0UNCNT0"):
+                try:
+                    msg = {
+                        "header": {
+                            "approval_key": self.approval_key,
+                            "custtype": "P",
+                            "tr_type": "2",
+                            "content-type": "utf-8",
+                        },
+                        "body": {"input": {"tr_id": tr_id, "tr_key": code}},
+                    }
+                    await self.ws.send(json.dumps(msg))
+                except Exception as e:
+                    logger.warning("ws_unsub_failed", code=code, tr_id=tr_id, error=str(e))
             self.subscribed_codes.discard(code)
+            await asyncio.sleep(0.05)
 
     async def resubscribe(self, new_codes: list[str]) -> None:
         """Unsubscribe removed codes, subscribe new ones."""
@@ -204,7 +236,7 @@ class KisWebSocket:
 
         while True:
             try:
-                msg = await self.ws.recv()
+                msg = await asyncio.wait_for(self.ws.recv(), timeout=120.0)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("ws_closed_by_remote")
                 self.connected = False
