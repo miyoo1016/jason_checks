@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tima-server",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["./run_web.sh"],
+      "port": 8000
+    }
+  ]
+}

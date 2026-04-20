@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHECKS Terminal — Real-time Stock Trading</title>
+
+    <!-- TailwindCSS CDN (for layout utilities) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Custom CSS (Theme) -->
+    <link rel="stylesheet" href="/static/css/checks.css">
+</head>
+<body>
+    <div id="app" x-data="timaApp()" x-init="init()">
+        <!-- Header -->
+        <header class="p-4 sticky top-0 z-10">
+            <div class="max-w-7xl mx-auto flex justify-between items-center">
+                <div>
+                    <h1 class="text-2xl">CHECKS Terminal</h1>
+                    <p class="text-xs opacity-60">KIS Open API — Premium Real-time Analytics</p>
+                </div>
+                <div class="flex gap-4 items-center">
+                    <div class="text-right text-sm">
+                        <div class="font-bold" x-text="`${currentTime}`"></div>
+                        <div class="text-xs opacity-60" x-text="`MODE: ${mode.toUpperCase()}`"></div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto p-4 md:p-6">
+            <!-- Status Bar -->
+            <div class="mb-6 p-4 rounded-xl border bg-white shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+                <div class="flex gap-6 text-xs font-bold uppercase tracking-wider">
+                    <div>
+                        <span x-show="wsConnected" class="text-green-600">🟢 WS:OK</span>
+                        <span x-show="!wsConnected" class="text-red-500">🔴 WS:OFFLINE</span>
+                    </div>
+                    <div class="text-gray-400">REST:READY</div>
+                    <div x-text="`TYPE: ${mode.toUpperCase()}`"></div>
+                    <div x-show="marketOpen()" class="text-blue-600">MARKET OPEN</div>
+                    <div x-show="!marketOpen()" class="text-amber-600">MARKET CLOSED</div>
+                </div>
+                <!-- Sort Toggle -->
+                <div class="flex gap-2">
+                    <button @click="setSortMode('strength')"
+                            :class="sortMode === 'strength' ? 'active' : ''"
+                            class="sort-btn">
+                        체결강도
+                    </button>
+                    <button @click="setSortMode('change_pct')"
+                            :class="sortMode === 'change_pct' ? 'active' : ''"
+                            class="sort-btn">
+                        상승률
+                    </button>
+                    <button @click="setSortMode('trading_value')"
+                            :class="sortMode === 'trading_value' ? 'active' : ''"
+                            class="sort-btn">
+                        거래대금
+                    </button>
+                </div>
+            </div>
+
+            <!-- Theme Grid (2x2 responsive) -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <template x-for="(themeData, themeName) in themes" :key="themeName">
+                    <div class="theme-card">
+                        <!-- Theme Header -->
+                        <div class="mb-3 pb-2 border-b border-gray-100">
+                            <div class="flex justify-between items-start">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <h2 class="text-base font-bold truncate" x-text="themeData.display_name"></h2>
+                                    <span class="theme-pct-pill mono"
+                                          :class="{
+                                             'up': (themeData.avg_change_pct || 0) >= 0,
+                                             'down': (themeData.avg_change_pct || 0) < 0
+                                           }"
+                                          x-text="`${(themeData.avg_change_pct || 0) >= 0 ? '+' : ''}${(themeData.avg_change_pct || 0).toFixed(2)}`">
+                                    </span>
+                                </div>
+                                <button @click="togglePin(themeName)" class="star-icon text-xl flex-shrink-0"
+                                        :class="{ 'pinned': isPinned(themeName) }">
+                                    <span x-text="isPinned(themeName) ? '★' : '☆'"></span>
+                                </button>
+                            </div>
+                            <div class="mt-2 flex items-center gap-2">
+                                <span class="text-[10px] font-bold text-gray-400">강도</span>
+                                <div class="theme-strength-bar flex-1">
+                                    <div class="theme-strength-bar-fill"
+                                         :style="`width: ${Math.min((themeData.strength || 0) / 5, 100)}%`">
+                                    </div>
+                                </div>
+                                <span class="text-[10px] font-bold mono text-gray-500"
+                                      x-text="`${(themeData.strength || 0).toFixed(1)}`"></span>
+                            </div>
+                        </div>
+
+                        <!-- Stock Rows -->
+                        <div class="space-y-1">
+                            <template x-for="(stock, idx) in (themeData.leaders || [])" :key="stock.code">
+                                <div class="stock-row" :class="{ 'limit-up': stock.change_pct >= 29.5 }">
+                                    <div class="flex items-center gap-2">
+                                        <!-- Name + Code -->
+                                        <div class="flex-1 min-w-0">
+                                            <div class="text-xs font-bold flex items-center truncate">
+                                                <span x-text="stock.name"></span>
+                                                <span x-show="stock.surge_active" class="surge-indicator">▲</span>
+                                            </div>
+                                            <div class="text-[9px] text-gray-400 mono" x-text="stock.code"></div>
+                                        </div>
+                                        <!-- Price + Change -->
+                                        <div class="text-right flex-shrink-0">
+                                            <div class="text-xs mono font-semibold"
+                                                 :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
+                                                 x-text="stock.price ? stock.price.toLocaleString('ko-KR') : '-'"></div>
+                                            <div class="text-[10px] font-bold mono"
+                                                 :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
+                                                 x-text="`${(stock.change_pct || 0) >= 0 ? '▲' : '▼'} ${Math.abs(stock.change_pct || 0).toFixed(2)}%`"></div>
+                                        </div>
+                                        <!-- Strength -->
+                                        <div class="text-right flex-shrink-0 w-12">
+                                            <div class="mono text-[11px] text-gray-700" x-text="`${(stock.strength || 0).toFixed(0)}`"></div>
+                                            <div class="text-[9px] text-gray-400">강도</div>
+                                        </div>
+                                        <!-- Trading Value -->
+                                        <div class="text-right flex-shrink-0 w-14">
+                                            <div class="mono text-[11px] text-gray-700">
+                                                <span x-show="stock.cumulative_trading_value"
+                                                      x-text="`${(stock.cumulative_trading_value / 100000000).toFixed(0)}억`"></span>
+                                                <span x-show="!stock.cumulative_trading_value">-</span>
+                                            </div>
+                                            <div class="text-[9px] text-gray-400">거래대금</div>
+                                        </div>
+                                    </div>
+                                    <!-- Range Bar V2 (compact) -->
+                                    <div class="range-bar-v2">
+                                        <div class="range-bar-center"></div>
+                                        <div class="range-bar-fill"
+                                             :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
+                                             :style="`width: ${Math.min(Math.abs(stock.change_pct || 0) * 1.6, 50)}%;
+                                                      ${stock.change_pct >= 0 ? 'margin-left: 50%' : 'margin-right: 50%; margin-left: auto'}`">
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Individual Surge Panel -->
+            <div class="surge-panel mb-6">
+                <div class="flex justify-between items-center mb-3">
+                    <h2 class="text-sm font-bold flex items-center gap-2">
+                        <span class="text-orange-500">🔥</span>
+                        개별 급등주
+                        <span class="text-[10px] font-normal text-gray-400" x-text="`${surges.length}종목 실시간`"></span>
+                    </h2>
+                    <div class="flex gap-1.5">
+                        <button @click="setSurgeSortMode('change_pct')"
+                                :class="surgeSortMode === 'change_pct' ? 'active' : ''"
+                                class="sort-btn text-[11px]">상승률</button>
+                        <button @click="setSurgeSortMode('strength')"
+                                :class="surgeSortMode === 'strength' ? 'active' : ''"
+                                class="sort-btn text-[11px]">체결강도</button>
+                        <button @click="setSurgeSortMode('trading_value')"
+                                :class="surgeSortMode === 'trading_value' ? 'active' : ''"
+                                class="sort-btn text-[11px]">거래대금</button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+                    <template x-for="stock in surges" :key="stock.code">
+                        <div class="surge-item">
+                            <div class="flex justify-between items-start mb-1">
+                                <div class="min-w-0 flex-1">
+                                    <div class="text-xs font-bold truncate" x-text="stock.name"></div>
+                                    <div class="text-[9px] text-gray-400 mono" x-text="stock.theme_display || '-'"></div>
+                                </div>
+                            </div>
+                            <div class="flex justify-between items-end">
+                                <div class="mono text-xs"
+                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
+                                     x-text="stock.price ? stock.price.toLocaleString('ko-KR') : '-'"></div>
+                                <div class="text-[11px] font-bold mono"
+                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
+                                     x-text="`${(stock.change_pct || 0) >= 0 ? '+' : ''}${(stock.change_pct || 0).toFixed(2)}%`"></div>
+                            </div>
+                            <div class="flex justify-between mt-1 text-[9px] text-gray-400">
+                                <span x-text="`강도 ${(stock.strength || 0).toFixed(1)}`"></span>
+                                <span x-show="stock.cumulative_trading_value"
+                                      x-text="`${(stock.cumulative_trading_value / 100000000).toFixed(0)}억`"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Market Closed Notice -->
+            <div x-show="!marketOpen()" class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-800 text-xs font-bold text-center mb-6 shadow-sm">
+                ⚠ 실시간 데이터 수신 대기 중 — 장중에 데이터가 실시간으로 갱신됩니다
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="p-8 mt-8 border-t border-gray-100 bg-white">
+            <div class="max-w-7xl mx-auto text-center">
+                <p class="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                    © 2026 CHECKS Terminal · KIS Open API · Premium Analytics Engine
+                </p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- App Script (load before Alpine.js so component is defined) -->
+    <script src="/static/js/app.js"></script>
+
+    <!-- Alpine.js for reactivity (load after app.js) -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,349 @@
+# CHECKS Terminal - Dynamic Theme Pool (25 themes)
+# 실시간 종목 데이터로 상위 4개 테마를 동적 선정
+
+themes:
+  반도체:
+    display_name: "반도체"
+    description: "반도체/파운드리/장비"
+    stocks:
+      - code: "005930"
+        name: "삼성전자"
+      - code: "000660"
+        name: "SK하이닉스"
+      - code: "042700"
+        name: "한미반도체"
+      - code: "403870"
+        name: "HPSP"
+      - code: "140860"
+        name: "파크시스템스"
+      - code: "240810"
+        name: "원익IPS"
+      - code: "036810"
+        name: "에프에스티"
+
+  2차전지:
+    display_name: "2차전지"
+    description: "배터리/양극재"
+    stocks:
+      - code: "373220"
+        name: "LG에너지솔루션"
+      - code: "006400"
+        name: "삼성SDI"
+      - code: "096770"
+        name: "SK이노베이션"
+      - code: "247540"
+        name: "에코프로비엠"
+      - code: "086520"
+        name: "에코프로"
+      - code: "003670"
+        name: "포스코퓨처엠"
+      - code: "066970"
+        name: "엘앤에프"
+
+  조선:
+    display_name: "조선"
+    description: "조선/해양플랜트"
+    stocks:
+      - code: "009540"
+        name: "HD한국조선해양"
+      - code: "329180"
+        name: "HD현대중공업"
+      - code: "010140"
+        name: "삼성중공업"
+      - code: "042660"
+        name: "한화오션"
+      - code: "010620"
+        name: "HD현대미포"
+      - code: "097230"
+        name: "HJ중공업"
+
+  방산:
+    display_name: "방산"
+    description: "방위산업/무기체계"
+    stocks:
+      - code: "012450"
+        name: "한화에어로스페이스"
+      - code: "272210"
+        name: "한화시스템"
+      - code: "047810"
+        name: "한국항공우주"
+      - code: "064350"
+        name: "현대로템"
+      - code: "034020"
+        name: "두산에너빌리티"
+      - code: "009830"
+        name: "한화솔루션"
+
+  K뷰티:
+    display_name: "K뷰티"
+    description: "화장품/에스테틱"
+    stocks:
+      - code: "090430"
+        name: "아모레퍼시픽"
+      - code: "051900"
+        name: "LG생활건강"
+      - code: "161890"
+        name: "한국콜마"
+      - code: "145020"
+        name: "휴젤"
+      - code: "214150"
+        name: "클래시스"
+      - code: "078520"
+        name: "에이블씨엔씨"
+
+  엔터:
+    display_name: "엔터"
+    description: "K-POP/엔터테인먼트"
+    stocks:
+      - code: "352820"
+        name: "하이브"
+      - code: "041510"
+        name: "SM엔터"
+      - code: "122870"
+        name: "와이지엔터"
+      - code: "035900"
+        name: "JYP엔터"
+      - code: "035420"
+        name: "NAVER"
+
+  게임:
+    display_name: "게임"
+    description: "게임/모바일게임"
+    stocks:
+      - code: "036570"
+        name: "엔씨소프트"
+      - code: "251270"
+        name: "넷마블"
+      - code: "259960"
+        name: "크래프톤"
+      - code: "293490"
+        name: "카카오게임즈"
+      - code: "317770"
+        name: "포켓소닉"
+
+  바이오:
+    display_name: "바이오"
+    description: "바이오/제약"
+    stocks:
+      - code: "207940"
+        name: "삼성바이오로직스"
+      - code: "068270"
+        name: "셀트리온"
+      - code: "196170"
+        name: "알테오젠"
+      - code: "326030"
+        name: "SK바이오팜"
+      - code: "128940"
+        name: "한올바이오파마"
+
+  자동차:
+    display_name: "자동차"
+    description: "완성차/부품"
+    stocks:
+      - code: "005380"
+        name: "현대차"
+      - code: "000270"
+        name: "기아"
+      - code: "012330"
+        name: "현대모비스"
+      - code: "161390"
+        name: "한국타이어"
+      - code: "003620"
+        name: "KCC"
+
+  금융:
+    display_name: "금융"
+    description: "은행/증권/보험"
+    stocks:
+      - code: "105560"
+        name: "KB금융"
+      - code: "055550"
+        name: "신한지주"
+      - code: "086790"
+        name: "하나금융지주"
+      - code: "316140"
+        name: "우리금융지주"
+      - code: "000810"
+        name: "삼성화재"
+
+  철강:
+    display_name: "철강"
+    description: "철강/소재"
+    stocks:
+      - code: "005490"
+        name: "POSCO홀딩스"
+      - code: "004020"
+        name: "현대제철"
+      - code: "103140"
+        name: "풍산"
+      - code: "108860"
+        name: "셀바스AI"
+
+  화학:
+    display_name: "화학"
+    description: "화학/정유"
+    stocks:
+      - code: "051910"
+        name: "LG화학"
+      - code: "011170"
+        name: "롯데케미칼"
+      - code: "010950"
+        name: "S-Oil"
+      - code: "345860"
+        name: "에이치엘시맨"
+
+  플랫폼:
+    display_name: "플랫폼"
+    description: "인터넷/플랫폼"
+    stocks:
+      - code: "035720"
+        name: "카카오"
+      - code: "377300"
+        name: "카카오페이"
+      - code: "323410"
+        name: "카카오뱅크"
+      - code: "395400"
+        name: "드래곤플라이"
+
+  AI반도체:
+    display_name: "AI반도체"
+    description: "AI칩/HBM/온디바이스"
+    stocks:
+      - code: "042700"
+        name: "한미반도체"
+      - code: "000990"
+        name: "DB하이텍"
+      - code: "108860"
+        name: "셀바스AI"
+      - code: "403870"
+        name: "HPSP"
+
+  로봇:
+    display_name: "로봇"
+    description: "산업용/서비스로봇"
+    stocks:
+      - code: "108490"
+        name: "로보티즈"
+      - code: "056080"
+        name: "유진로봇"
+      - code: "445680"
+        name: "두산로보틱스"
+      - code: "090850"
+        name: "현대엘리베이터"
+
+  원자력:
+    display_name: "원자력"
+    description: "원전/SMR"
+    stocks:
+      - code: "015760"
+        name: "한국전력"
+      - code: "034020"
+        name: "두산에너빌리티"
+      - code: "010060"
+        name: "OCI"
+      - code: "052690"
+        name: "한전기술"
+
+  수소:
+    display_name: "수소"
+    description: "수소/연료전지"
+    stocks:
+      - code: "336260"
+        name: "두산퓨얼셀"
+      - code: "005490"
+        name: "POSCO홀딩스"
+      - code: "009830"
+        name: "한화솔루션"
+      - code: "363710"
+        name: "탐탁"
+
+  음식료:
+    display_name: "음식료"
+    description: "식품/음료"
+    stocks:
+      - code: "097950"
+        name: "CJ제일제당"
+      - code: "004370"
+        name: "농심"
+      - code: "003230"
+        name: "삼양식품"
+      - code: "271560"
+        name: "오리온"
+
+  유통:
+    display_name: "유통"
+    description: "백화점/편의점/홈쇼핑"
+    stocks:
+      - code: "023530"
+        name: "롯데쇼핑"
+      - code: "139480"
+        name: "이마트"
+      - code: "004170"
+        name: "신세계"
+      - code: "007070"
+        name: "GS리테일"
+
+  건설:
+    display_name: "건설"
+    description: "종합건설/인프라"
+    stocks:
+      - code: "000720"
+        name: "현대건설"
+      - code: "028260"
+        name: "삼성물산"
+      - code: "009830"
+        name: "GS건설"
+      - code: "047040"
+        name: "대우건설"
+
+  통신:
+    display_name: "통신"
+    description: "통신/5G"
+    stocks:
+      - code: "017670"
+        name: "SK텔레콤"
+      - code: "030200"
+        name: "KT"
+      - code: "032640"
+        name: "LG유플러스"
+      - code: "017250"
+        name: "KTis"
+
+  여행:
+    display_name: "여행"
+    description: "항공/여행/면세점"
+    stocks:
+      - code: "003490"
+        name: "대한항공"
+      - code: "020560"
+        name: "아시아나항공"
+      - code: "039130"
+        name: "하나투어"
+      - code: "008770"
+        name: "호텔신라"
+
+  디스플레이:
+    display_name: "디스플레이"
+    description: "OLED/패널"
+    stocks:
+      - code: "034220"
+        name: "LG디스플레이"
+      - code: "009150"
+        name: "삼성전기"
+      - code: "005070"
+        name: "코스모신소재"
+      - code: "213420"
+        name: "덕산네오룩스"
+
+  태양광:
+    display_name: "태양광"
+    description: "태양광/재생에너지"
+    stocks:
+      - code: "009830"
+        name: "한화솔루션"
+      - code: "010060"
+        name: "OCI"
+      - code: "267250"
+        name: "HD현대"
+      - code: "078520"
+        name: "에이블씨엔씨"
