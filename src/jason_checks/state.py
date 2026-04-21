@@ -11,6 +11,7 @@ class StockState:
     """Real-time state of a single stock."""
 
     code: str
+    name: str = ""
     price: float = 0.0
     change_pct: float = 0.0
     cum_volume_krw: int = 0

@@ -141,7 +141,10 @@ function timaApp() {
 
         async loadSurges() {
             try {
-                const response = await fetch(`/api/surges?sort=${this.surgeSortMode}&limit=10`);
+                const cacheBuster = new Date().getTime();
+                const response = await fetch(`/api/surges?sort=${this.surgeSortMode}&_t=${cacheBuster}&limit=10`, {
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 const data = await response.json();
                 if (data.surges) {
                     // Normalize field names (REST API vs WS fallback may differ)
@@ -177,7 +180,11 @@ function timaApp() {
         async loadThemes() {
             try {
                 const pinnedStr = [...this.pinnedThemes].join(',');
-                const response = await fetch(`/api/themes?sort=${this.sortMode}&pinned=${pinnedStr}`);
+                // ★ CHANGED: 브라우저 캐시 무력화 (새로고침 안 해도 무조건 최신 데이터 받아오기)
+                const cacheBuster = new Date().getTime();
+                const response = await fetch(`/api/themes?sort=${this.sortMode}&pinned=${pinnedStr}&_t=${cacheBuster}`, {
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 const data = await response.json();
 
                 // Only update wsConnected from API if we don't have a local active socket
@@ -311,10 +318,11 @@ function timaApp() {
             // Update the stock data in each theme
             for (const themeName in this.themes) {
                 const theme = this.themes[themeName];
+                // ★ REVERTED: 백엔드가 'leaders'로 반환하므로 theme.leaders가 맞음
                 if (theme.leaders) {
                     for (const leader of theme.leaders) {
                         if (leader.code === code && this.stocks[code]) {
-                            // Update leader with latest tick, preserving surge_active
+                            // Update stock with latest tick, preserving surge_active
                             const surgeState = leader.surge_active;
                             Object.assign(leader, this.stocks[code]);
                             if (surgeState) leader.surge_active = surgeState;

@@ -147,6 +147,18 @@ class KisWebSocket:
         self.approval_key = await get_approval_key()
         self.subscribed_codes.clear()
 
+        # ★ NEW: 이전 연결의 stale 메시지 제거
+        drained = 0
+        while not self.cmd_queue.empty():
+            try:
+                self.cmd_queue.get_nowait()
+                self.cmd_queue.task_done()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        if drained:
+            logger.info("cmd_queue_drained", count=drained)
+
         self.ws = await websockets.connect(
             ws_url,
             ping_interval=20,
@@ -163,13 +175,14 @@ class KisWebSocket:
         logger.info("ws_connected", url=ws_url)
 
     async def _command_worker(self):
-        """Processes subscription commands one by one with safe delay."""
+        """Processes subscription commands one by one with safe delay (0.55s for 2 req/sec limit)."""
         while self.connected:
             try:
                 cmd = await self.cmd_queue.get()
                 if self.ws:
                     await self.ws.send(json.dumps(cmd))
-                    await asyncio.sleep(0.2) # Strict 200ms delay between commands
+                    # ★ CHANGED: 0.2s -> 0.55s (한투 실전 1초당 2건 제한 준수)
+                    await asyncio.sleep(0.55) 
                 self.cmd_queue.task_done()
             except Exception as e:
                 logger.error("ws_worker_error", error=str(e))
@@ -211,7 +224,8 @@ class KisWebSocket:
                 }
                 await self.cmd_queue.put(msg_nxt)
 
-            self.subscribed_codes.add(code)
+            # ★ REMOVED: self.subscribed_codes.add(code) 
+            # 이제 stream()에서 서버의 성공 ACK를 받았을 때만 추가함
 
     async def unsubscribe(self, codes: list[str]) -> None:
         """Queue unsubscription requests."""
@@ -272,7 +286,14 @@ class KisWebSocket:
                     
                     rt_cd = data.get("body", {}).get("rt_cd")
                     msg1 = data.get("body", {}).get("msg1", "")
-                    logger.info("ws_ack", tr_id=tr_id, rt_cd=rt_cd, msg=msg1)
+                    
+                    # ★ NEW: 서버가 구독 성공(rt_cd="0")을 보냈을 때만 내부 구독 목록에 추가
+                    tr_key = header.get("tr_key")
+                    if rt_cd == "0" and tr_key:
+                        self.subscribed_codes.add(tr_key)
+                        logger.info("ws_subscribe_success", code=tr_key, msg=msg1)
+                    else:
+                        logger.info("ws_ack", tr_id=tr_id, rt_cd=rt_cd, msg=msg1)
                     continue
                 except json.JSONDecodeError:
                     pass

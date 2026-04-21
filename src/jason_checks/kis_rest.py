@@ -10,6 +10,16 @@ from jason_checks.config import get_urls, get_active_credentials, get_settings
 
 logger = structlog.get_logger()
 
+_global_client = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _global_client
+    if _global_client is None:
+        limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+        _global_client = httpx.AsyncClient(verify=False, limits=limits)
+    return _global_client
+
+
 ACCESS_TOKEN_CACHE = Path("data/.access_token_cache.json")
 
 # In-memory cache for top movers (2-second TTL to respect KIS rate limits)
@@ -40,7 +50,8 @@ async def get_access_token() -> str:
         "appsecret": app_secret,
     }
 
-    async with httpx.AsyncClient(verify=False) as client:
+    client = get_http_client()
+    if True:
         resp = await client.post(endpoint, json=body, timeout=10.0)
         resp.raise_for_status()
         data = resp.json()
@@ -106,7 +117,8 @@ async def fetch_top_movers(
     }
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        client = get_http_client()
+        if True:
             resp = await client.get(url, headers=headers, params=params, timeout=10.0)
             resp.raise_for_status()
             data = resp.json()
@@ -177,7 +189,8 @@ async def fetch_nxt_price(code: str) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        client = get_http_client()
+        if True:
             resp = await client.get(url, headers=headers, params=params, timeout=5.0)
             if resp.status_code != 200:
                 logger.warning("nxt_price_http_error", code=code, status=resp.status_code)
@@ -211,11 +224,12 @@ def filter_non_theme_stocks(
         if code in active_leader_codes:
             continue
         meta = code_theme_map.get(code, {})
+        # ★ CHANGED: stock.name이 있으면 우선 사용하고 없으면 meta에서 가져옴
         candidates.append({
             "code": code,
-            "name": meta.get("name", code),
+            "name": stock.name or meta.get("name", code),
             "theme_code": meta.get("theme_code", ""),
-            "theme_display": meta.get("theme_display", ""),
+            "theme_display": meta.get("theme_display", "-"),
             "price": stock.price,
             "change_pct": stock.change_pct,
             "strength": stock.execution_strength,
@@ -259,7 +273,8 @@ async def fetch_current_price(code: str) -> dict:
     for mrkt in market_codes:
         params = {"fid_cond_mrkt_div_code": mrkt, "fid_input_iscd": code}
         try:
-            async with httpx.AsyncClient(verify=False) as client:
+            client = get_http_client()
+            if True:
                 resp = await client.get(url, headers=headers, params=params, timeout=5.0)
                 if resp.status_code != 200:
                     logger.warning("price_http_error", code=code, market=mrkt, status=resp.status_code)
@@ -330,7 +345,8 @@ async def fetch_market_indices() -> dict:
             "fid_input_iscd": code,
         }
         try:
-            async with httpx.AsyncClient(verify=False) as client:
+            client = get_http_client()
+            if True:
                 resp = await client.get(url, headers=headers, params=params, timeout=5.0)
                 if resp.status_code != 200:
                     logger.warning("index_http_error", code=code, status=resp.status_code)
@@ -382,13 +398,14 @@ async def fetch_stock_investor_trend(code: str) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        client = get_http_client()
+        if True:
             resp = await client.get(url, headers=headers, params=params, timeout=5.0)
             if resp.status_code != 200:
-                return {"foreigner": 0, "institution": 0, "individual": 0}
+                return None  # ★ CHANGED: 에러 시 0이 아니라 None을 반환하여 무시하도록 수정
             data = resp.json()
             if data.get("rt_cd") != "0":
-                return {"foreigner": 0, "institution": 0, "individual": 0}
+                return None
 
         output = data.get("output", [])
         if not output:
@@ -399,7 +416,8 @@ async def fetch_stock_investor_trend(code: str) -> dict:
         target = None
         for row in rows:
             val = row.get("frgn_ntby_tr_pbmn")
-            if val not in ("", None, "0"):
+            # ★ CHANGED: "0"은 실제 수급일 수 있으므로 무시 조건에서 제외
+            if val not in ("", None):
                 target = row
                 break
         if target is None:
@@ -446,7 +464,8 @@ async def fetch_index_investor_trend(index_code: str) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient(verify=False) as client:
+        client = get_http_client()
+        if True:
             resp = await client.get(url, headers=headers, params=params, timeout=5.0)
             if resp.status_code != 200:
                 return {"foreigner": 0, "institution": 0, "individual": 0}

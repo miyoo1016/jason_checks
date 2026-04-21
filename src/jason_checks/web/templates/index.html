@@ -123,14 +123,9 @@
                                     <span x-text="isPinned(themeName) ? '★' : '☆'"></span>
                                 </button>
                             </div>
-                            <div class="mt-2 flex items-center gap-2">
-                                <span class="text-[10px] font-bold text-gray-400">강도</span>
-                                <div class="theme-strength-bar flex-1">
-                                    <div class="theme-strength-bar-fill"
-                                         :style="`width: ${Math.min((themeData.strength || 0) / 5, 100)}%`">
-                                    </div>
-                                </div>
-                                <span class="text-[10px] font-bold mono text-gray-500"
+                            <div class="mt-2 flex items-center gap-1.5">
+                                <span class="text-[10px] font-black text-gray-400 uppercase tracking-tighter">Theme Strength</span>
+                                <span class="text-[11px] font-black mono text-orange-600"
                                       x-text="`${(themeData.strength || 0).toFixed(1)}`"></span>
                             </div>
                         </div>

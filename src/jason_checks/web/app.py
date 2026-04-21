@@ -130,7 +130,7 @@ async def _stock_investor_loop(app):
             unique_codes = list(dict.fromkeys(priority_codes))[:20]
             for code in unique_codes:
                 tr = await fetch_stock_investor_trend(code)
-                if tr and (tr["foreigner"] != 0 or tr["institution"] != 0):
+                if tr:  # ★ CHANGED: tr이 None이 아닐 때만(정상 응답일 때만)
                     app_state.update_stock(
                         code,
                         investor_foreigner=tr["foreigner"],
@@ -138,26 +138,88 @@ async def _stock_investor_loop(app):
                         investor_individual=tr["individual"],
                     )
                     await bridge.broadcast_investor_update(code, tr)
-                await asyncio.sleep(0.8) # 800ms delay to stay safe
+                # ★ CHANGED: 한투 수급 API 방화벽을 절대 피하는 안전한 딜레이(1.5초)
+                await asyncio.sleep(1.5)
         except Exception as e:
             logger.warning("stock_investor_loop_error", error=str(e))
+        await asyncio.sleep(600)  # ★ CHANGED: 10초 -> 10분(600초) 단위로 대폭 완화
+
+
+async def _baseline_price_loop(app):
+    """
+    천천히(1초당 1개씩) REST API로 16개 종목의 기준 가격(NXT 포함)을 보충합니다.
+    웹소켓은 '거래가 발생할 때만' 틱을 주기 때문에, 애프터장에 거래가 없는 종목은
+    가격이 갱신되지 않는 문제를 해결하는 완벽한 하이브리드 안전망입니다.
+    """
+    from jason_checks.kis_rest import fetch_current_price
+    import json
+    from datetime import datetime as _dt
+    
+    bridge = get_bridge()
+    while True:
+        try:
+            target_codes = list(app_state.visible_codes)
+            for code in target_codes:
+                try:
+                    data = await fetch_current_price(code)
+                    if data:
+                        st = app_state.stocks.get(code)
+                        # REST 데이터로 상태 업데이트
+                        app_state.update_stock(
+                            code,
+                            price=data["price"],
+                            change_pct=data["change_pct"],
+                            cumulative_trading_value=data.get("trading_value", 0),
+                            market=data.get("market", "J")
+                        )
+                        # 프론트엔드 브로드캐스트
+                        strength = data.get("strength", 0) or (st.execution_strength if st else 0.0)
+                        msg = {
+                            "type": "tick",
+                            "code": code,
+                            "price": data["price"],
+                            "change_pct": data["change_pct"],
+                            "market": data.get("market", "J"),
+                            "strength": strength,
+                            "timestamp": _dt.now().strftime("%H%M%S"),
+                        }
+                        await bridge._broadcast(json.dumps(msg))
+                    
+                    # ★ 1초에 1개씩 아주 천천히 요청 (방화벽 절대 차단 안 당함)
+                    await asyncio.sleep(1.0)
+                except Exception as e:
+                    logger.debug("baseline_price_single_error", code=code, error=str(e))
+
+        except Exception as e:
+            logger.warning("baseline_price_loop_error", error=str(e))
+        
+        # 16개 다 돌면 10초 휴식 (1사이클 약 26초 소요)
         await asyncio.sleep(10)
 
 
 async def _subscription_manager_loop(app):
-    """Manage WebSocket subscriptions in a stable background loop every 15s."""
+    """Manage WebSocket subscriptions in a stable background loop every 5s."""
+    force_resub_interval = 0
     while True:
         try:
             if app_state.ws_connected:
                 # 현재 상태에서 필요한 모든 종목 (화면 종목 + 테마 대표주)
-                # get_themes()에서 업데이트된 app_state.visible_codes 사용
                 current_needed = list(app_state.visible_codes)
                 if current_needed:
+                    ws = get_ws()
+                    # ★ NEW: 30초마다 (6회 × 5s) subscribed_codes를 강제 초기화해
+                    # 조용히 실패한 구독들을 재시도
+                    force_resub_interval += 1
+                    if force_resub_interval >= 6:
+                        force_resub_interval = 0
+                        ws.subscribed_codes.clear()
+                        logger.info("force_resub_clear", reason="periodic_retry")
+                    
                     logger.info("sync_subscriptions", count=len(current_needed))
-                    await get_ws().resubscribe(current_needed)
+                    await ws.resubscribe(current_needed)
         except Exception as e:
             logger.error("sub_manager_error", error=str(e))
-        await asyncio.sleep(15)
+        await asyncio.sleep(5)  # ★ CHANGED: 15s → 5s
 
 
 async def _theme_rank_supplement_loop(app):
@@ -169,8 +231,11 @@ async def _theme_rank_supplement_loop(app):
             for mover in top:
                 code = mover["code"]
                 st = app_state.stocks.get(code)
+                # ★ NEW: 이름은 무조건 업데이트 (코드만 나오는 현상 방지)
+                if mover.get("name"):
+                    app_state.get_or_create_stock(code).name = mover["name"]
+                    
                 # WS 틱이 없거나 가격이 0인 종목에 REST 데이터 보충
-                # strength는 REST에서 0이므로 업데이트 안 함 (WS 우선)
                 if not st or st.price == 0:
                     app_state.update_stock(
                         code,
@@ -242,12 +307,15 @@ def create_app() -> FastAPI:
         try:
             # REST top_movers로 오늘 강세 테마를 파악해 초기 active themes 결정
             initial_themes = await _get_initial_themes_by_movers(app.theme_data)
-            # Use expanded subscription: active themes + 1 per inactive theme
+            # ★ CHANGED: max_codes=40 → max_codes=16 (4테마 × 상위 4종목)
+            # 서버 구독 한도 초과 방지, 나머지는 _subscription_manager_loop가 담당
             codes_to_sub = get_expanded_subscription_codes(
-                app.theme_data, initial_themes, max_codes=40
+                app.theme_data, initial_themes, max_codes=16
             )
             codes_to_sub = codes_to_sub if codes_to_sub else ["005930"]
             logger.info("initial_subscription", count=len(codes_to_sub))
+            # ★ NEW: visible_codes를 시작부터 세팅 (바로 _baseline_price_loop이 즉시 실행되도록)
+            app_state.set_visible_codes(codes_to_sub)
             await start_bridge(codes_to_sub)
         except Exception as e:
             logger.error("startup_failed", error=str(e))
@@ -261,6 +329,8 @@ def create_app() -> FastAPI:
         asyncio.create_task(_subscription_manager_loop(app))
         # Background: REST data supplement for theme ranking (inactive 테마 종목 커버리지 개선)
         asyncio.create_task(_theme_rank_supplement_loop(app))
+        # Background: Baseline price filler (1초 1건 안전 보충)
+        asyncio.create_task(_baseline_price_loop(app))
 
     # Shutdown event
     @app.on_event("shutdown")
@@ -308,7 +378,8 @@ def create_app() -> FastAPI:
         active_themes = rank_themes(app.theme_data, top_n=4, pinned=pinned_list)
 
         # Update visible codes in state so background loops know what to prioritize
-        active_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=40)
+        # ★ CHANGED: max_codes=40 → max_codes=16 (웹소켓 40개 한도 초과 방지 핵심)
+        active_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=16)
         app_state.set_visible_codes(active_codes)
         
         # REMOVED: resubscribe from here. Now handled by background _subscription_manager_loop
@@ -337,7 +408,12 @@ def create_app() -> FastAPI:
                 # Force update app_state with what we need to track
                 app_state.get_or_create_stock(code)
                 
-                if code not in stock_ticks or stock_ticks[code].get("price", 0) == 0:
+                # ★ CHANGED: price==0 조건 → 60초 이상 오래된 데이터도 갱신 (종가 잘못 표시 방지)
+                existing_st = app_state.stocks.get(code)
+                last_ts = existing_st.last_tick_ts if existing_st else None
+                age_secs = (now_ts - last_ts).total_seconds() if last_ts else 9999
+                is_stale = (code not in stock_ticks) or (stock_ticks.get(code, {}).get("price", 0) == 0) or (age_secs > 60)
+                if is_stale:
                     try:
                         await asyncio.sleep(0.1) # Avoid rate limit
                         data = await fetch_current_price(code)

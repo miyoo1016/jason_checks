@@ -42,9 +42,12 @@ class WSBridge:
         while self.running:
             stream_ok = False
             try:
-                logger.info("kis_connect_start")
+                # ★ CHANGED: 재연결 시 app_state.visible_codes 우선 사용 (현재 화면 종목)
+                current_codes = list(app_state.visible_codes) if app_state.visible_codes else codes
+                
+                logger.info("kis_connect_start", codes_count=len(current_codes))
                 await self.kis_ws.connect()
-                await self.kis_ws.subscribe(codes)
+                await self.kis_ws.subscribe(current_codes)
                 app_state.ws_connected = True
                 logger.info("kis_connected")
                 retry_delay = 1
