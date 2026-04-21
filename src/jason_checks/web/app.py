@@ -39,6 +39,7 @@ logger = structlog.get_logger()
 
 async def _market_indices_loop():
     """Poll KOSPI/KOSDAQ index prices every 5s."""
+    bridge = get_bridge()
     while True:
         try:
             data = await fetch_market_indices()
@@ -50,51 +51,136 @@ async def _market_indices_loop():
                     change_pct=info["change_pct"],
                     change_value=info["change_value"],
                 )
+                # 즉시 브로드캐스트
+                await bridge.broadcast_index_update(code, {
+                    "name": info["name"],
+                    "price": info["price"],
+                    "change_pct": info["change_pct"],
+                    "change_value": info["change_value"],
+                    "investor_foreigner": app_state.indices.get(code).investor_foreigner if code in app_state.indices else 0,
+                    "investor_institution": app_state.indices.get(code).investor_institution if code in app_state.indices else 0,
+                    "investor_individual": app_state.indices.get(code).investor_individual if code in app_state.indices else 0,
+                })
         except Exception as e:
             logger.warning("market_indices_loop_error", error=str(e))
         await asyncio.sleep(5)
 
 
 async def _index_investor_loop():
-    """Poll KOSPI/KOSDAQ investor trend every 10s."""
+    """Poll KOSPI/KOSDAQ investor trend every 30s.
+    
+    If API fails, aggregate from major stocks.
+    """
+    bridge = get_bridge()
+    KOSPI_MAJORS = ["005930", "000660", "207940", "373220", "005380"]
+    KOSDAQ_MAJORS = ["247540", "196170", "028300", "058470", "086520"]
+
     while True:
         try:
-            for code in ("0001", "1001"):
-                tr = await fetch_index_investor_trend(code)
+            for idx_code, majors in (("0001", KOSPI_MAJORS), ("1001", KOSDAQ_MAJORS)):
+                tr = await fetch_index_investor_trend(idx_code)
+                
+                # If API returns 0 or fails, fallback to major aggregation
+                if tr["foreigner"] == 0 and tr["institution"] == 0:
+                    logger.info("index_inv_api_empty_falling_back", code=idx_code)
+                    agg = {"foreigner": 0, "institution": 0, "individual": 0}
+                    for code in majors:
+                        mtr = await fetch_stock_investor_trend(code)
+                        for k in agg:
+                            agg[k] += mtr.get(k, 0)
+                        await asyncio.sleep(0.2)
+                    tr = agg
+
                 app_state.update_index(
-                    code,
+                    idx_code,
                     investor_foreigner=tr["foreigner"],
                     investor_institution=tr["institution"],
                     investor_individual=tr["individual"],
                 )
-                await asyncio.sleep(0.3)
+                # 즉시 브로드캐스트
+                idx = app_state.indices.get(idx_code)
+                await bridge.broadcast_index_update(idx_code, {
+                    "name": idx.name,
+                    "price": idx.price,
+                    "change_pct": idx.change_pct,
+                    "change_value": idx.change_value,
+                    "investor_foreigner": tr["foreigner"],
+                    "investor_institution": tr["institution"],
+                    "investor_individual": tr["individual"],
+                })
+                await asyncio.sleep(1.0)
         except Exception as e:
             logger.warning("index_investor_loop_error", error=str(e))
-        await asyncio.sleep(10)
+        await asyncio.sleep(30) # Relaxed to 30s as KIS limit is strict
 
 
 async def _stock_investor_loop(app):
-    """Poll per-stock investor trend every 30s for active grid stocks only."""
+    """Poll per-stock investor trend every 15s for visible stocks (high priority)."""
+    bridge = get_bridge()
     while True:
         try:
-            # 활성 4개 테마의 리더 종목만 (과다한 호출 방지)
-            active_themes = list(getattr(app, "theme_data", {}).keys())[:4]
-            codes: list[str] = []
-            for tc in active_themes:
-                stocks = app.theme_data.get(tc, {}).get("stocks", [])[:4]
-                codes.extend(s["code"] for s in stocks)
-            # 최대 16개 한정
-            for code in codes[:16]:
+            # 우선순위 1: 현재 화면에 보이는 종목
+            # 우선순위 2: 활성 테마의 리더들
+            priority_codes = list(app_state.visible_codes)
+            if not priority_codes:
+                for tc in list(app.theme_data.keys())[:4]:
+                    stocks = app.theme_data.get(tc, {}).get("stocks", [])[:4]
+                    priority_codes.extend(s["code"] for s in stocks)
+            
+            unique_codes = list(dict.fromkeys(priority_codes))[:20]
+            for code in unique_codes:
                 tr = await fetch_stock_investor_trend(code)
-                app_state.update_stock(
-                    code,
-                    investor_foreigner=tr["foreigner"],
-                    investor_institution=tr["institution"],
-                    investor_individual=tr["individual"],
-                )
-                await asyncio.sleep(0.2)
+                if tr and (tr["foreigner"] != 0 or tr["institution"] != 0):
+                    app_state.update_stock(
+                        code,
+                        investor_foreigner=tr["foreigner"],
+                        investor_institution=tr["institution"],
+                        investor_individual=tr["individual"],
+                    )
+                    await bridge.broadcast_investor_update(code, tr)
+                await asyncio.sleep(0.8) # 800ms delay to stay safe
         except Exception as e:
             logger.warning("stock_investor_loop_error", error=str(e))
+        await asyncio.sleep(10)
+
+
+async def _subscription_manager_loop(app):
+    """Manage WebSocket subscriptions in a stable background loop every 15s."""
+    while True:
+        try:
+            if app_state.ws_connected:
+                # 현재 상태에서 필요한 모든 종목 (화면 종목 + 테마 대표주)
+                # get_themes()에서 업데이트된 app_state.visible_codes 사용
+                current_needed = list(app_state.visible_codes)
+                if current_needed:
+                    logger.info("sync_subscriptions", count=len(current_needed))
+                    await get_ws().resubscribe(current_needed)
+        except Exception as e:
+            logger.error("sub_manager_error", error=str(e))
+        await asyncio.sleep(15)
+
+
+async def _theme_rank_supplement_loop(app):
+    """30초마다 REST top_movers로 inactive 테마 종목들의 가격/등락 데이터 보충."""
+    from jason_checks.kis_rest import fetch_top_movers_cached
+    while True:
+        try:
+            top = await fetch_top_movers_cached(market="J", sort="0", limit=100)
+            for mover in top:
+                code = mover["code"]
+                st = app_state.stocks.get(code)
+                # WS 틱이 없거나 가격이 0인 종목에 REST 데이터 보충
+                # strength는 REST에서 0이므로 업데이트 안 함 (WS 우선)
+                if not st or st.price == 0:
+                    app_state.update_stock(
+                        code,
+                        price=mover["price"],
+                        change_pct=mover["change_pct"],
+                        cumulative_trading_value=mover.get("cumulative_trading_value", 0),
+                    )
+                    logger.debug("rank_supplement_updated", code=code, price=mover["price"])
+        except Exception as e:
+            logger.warning("theme_rank_supplement_error", error=str(e))
         await asyncio.sleep(30)
 
 
@@ -142,9 +228,13 @@ def create_app() -> FastAPI:
 
         # Background: market indices every 5s
         asyncio.create_task(_market_indices_loop())
-        # Background: investor trends every 30s (stocks) and 10s (indices)
+        # Background: investor trends
         asyncio.create_task(_index_investor_loop())
         asyncio.create_task(_stock_investor_loop(app))
+        # Background: Subscription Sync
+        asyncio.create_task(_subscription_manager_loop(app))
+        # Background: REST data supplement for theme ranking (inactive 테마 종목 커버리지 개선)
+        asyncio.create_task(_theme_rank_supplement_loop(app))
 
     # Shutdown event
     @app.on_event("shutdown")
@@ -191,8 +281,11 @@ def create_app() -> FastAPI:
         pinned_list = [p for p in pinned.split(",") if p.strip()]
         active_themes = rank_themes(app.theme_data, top_n=4, pinned=pinned_list)
 
+        # Update visible codes in state so background loops know what to prioritize
         active_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=40)
-        asyncio.create_task(get_ws().resubscribe(active_codes))
+        app_state.set_visible_codes(active_codes)
+        
+        # REMOVED: resubscribe from here. Now handled by background _subscription_manager_loop
 
         stock_ticks = {}
         for code, stock in app_state.stocks.items():
@@ -215,29 +308,41 @@ def create_app() -> FastAPI:
             theme_stocks = app.theme_data.get(theme_code, {}).get("stocks", [])
             for stock in theme_stocks[:4]:
                 code = stock["code"]
+                # Force update app_state with what we need to track
+                app_state.get_or_create_stock(code)
+                
                 if code not in stock_ticks or stock_ticks[code].get("price", 0) == 0:
                     try:
                         await asyncio.sleep(0.1) # Avoid rate limit
                         data = await fetch_current_price(code)
                         if data:
+                            existing = app_state.stocks.get(code)
+                            # REST strength는 0일 수 있음 → WS 값이 있으면 우선 유지
+                            rest_strength = data.get("strength", 0) or 0
+                            ws_strength = existing.execution_strength if existing else 0.0
+                            strength = rest_strength if rest_strength > 0 else ws_strength
+
                             stock_ticks[code] = {
                                 "price": data["price"],
                                 "change_pct": data["change_pct"],
                                 "cumulative_volume": data["volume"],
                                 "cumulative_trading_value": data.get("trading_value", 0),
-                                "strength": 100.0,
+                                "strength": strength,
                                 "timestamp": now_ts.strftime("%H%M%S"),
-                                "investor_foreigner": 0,
+                                "investor_foreigner": stock.get("investor_foreigner", 0) if isinstance(stock, dict) else (stock.investor_foreigner if hasattr(stock, "investor_foreigner") else 0),
                                 "investor_institution": 0,
                                 "investor_individual": 0,
                             }
                             # Update app_state so it persists
-                            app_state.update_stock(
-                                code,
-                                price=data["price"],
-                                change_pct=data["change_pct"],
-                                cumulative_trading_value=data.get("trading_value", 0),
-                            )
+                            # REST strength=0이면 WS 값을 유지하도록 조건부 업데이트
+                            update_kwargs = {
+                                "price": data["price"],
+                                "change_pct": data["change_pct"],
+                                "cumulative_trading_value": data.get("trading_value", 0),
+                            }
+                            if rest_strength > 0:
+                                update_kwargs["execution_strength"] = rest_strength
+                            app_state.update_stock(code, **update_kwargs)
                     except Exception as e:
                         logger.error("individual_fallback_failed", code=code, error=str(e))
 

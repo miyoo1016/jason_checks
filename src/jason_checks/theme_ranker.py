@@ -27,21 +27,41 @@ def compute_theme_raw_score(theme_code: str, theme_data: Dict) -> float:
         return 0.0
 
     scores = []
+    down_count = 0
     for stock_info in stocks_in_theme:
         code = stock_info["code"]
         stock = app_state.stocks.get(code)
         if not stock or stock.price == 0:
             continue
 
-        change_score = stock.change_pct * 2
-        strength_score = (stock.execution_strength or 0) * 0.5
-        value_score = (stock.cumulative_trading_value / 1_000_000_000) * 0.3
+        # 등락률이 주 지표 (가중치 대폭 상향)
+        change_score = stock.change_pct * 20
+        strength_score = (stock.execution_strength or 0) * 0.3
+        value_score = (stock.cumulative_trading_value / 1_000_000_000) * 0.05
+
+        # 하락 종목은 추가 페널티
+        if stock.change_pct < 0:
+            down_count += 1
+            change_score *= 1.5
 
         scores.append(change_score + strength_score + value_score)
 
     if not scores:
-        return 0.0
-    return sum(scores) / len(scores)
+        return -999.0  # Massive penalty for themes with no data
+
+    avg_score = sum(scores) / len(scores)
+
+    # 커버리지(데이터 있는 종목 비율)에 따른 페널티
+    # coverage 1.0 → *1.0, 0.2 → *0.45, 0.5 → *0.71
+    # inactive 테마(커버리지 낮음)는 점수가 감소하므로 상승 종목이 하락 active 테마보다 우위
+    coverage = len(scores) / len(stocks_in_theme)
+    avg_score = avg_score * (coverage ** 0.5)
+
+    # 절반 이상 하락 또는 활성 데이터가 부족하면 추가 페널티 (강화: -10 → -15)
+    if down_count >= len(stocks_in_theme) / 2 or len(scores) < (len(stocks_in_theme) / 2):
+        avg_score -= 15.0
+
+    return avg_score
 
 
 def update_theme_scores(theme_data: Dict) -> None:
