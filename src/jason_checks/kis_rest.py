@@ -271,11 +271,20 @@ async def fetch_current_price(code: str) -> dict:
                 out = data.get("output", {})
                 price = int(out.get("stck_prpr", 0) or 0)
                 if price > 0:
+                    # cttr이 0이면 매수/매도 수량 비율로 계산
+                    cttr = float(out.get("cttr", 0) or 0)
+                    if cttr == 0:
+                        sell_vol = float(out.get("seln_cntg_smtn", 0) or 0)
+                        buy_vol = float(out.get("shnu_cntg_smtn", 0) or 0)
+                        if sell_vol > 0:
+                            cttr = round(buy_vol / sell_vol * 100, 2)
+
                     return {
                         "price": price,
                         "change_pct": float(out.get("prdy_ctrt", 0) or 0),
                         "volume": int(out.get("acml_vol", 0) or 0),
                         "trading_value": int(out.get("acml_tr_pbmn", 0) or 0),
+                        "strength": cttr,
                         "market": mrkt,
                     }
         except Exception as e:
@@ -385,13 +394,22 @@ async def fetch_stock_investor_trend(code: str) -> dict:
         if not output:
             return {"foreigner": 0, "institution": 0, "individual": 0}
 
-        # 가장 최근 행(오늘 또는 최신 일자)에서 순매수 거래대금 취득
-        # KIS 필드: frgn_ntby_tr_pbmn (외인), orgn_ntby_tr_pbmn (기관), prsn_ntby_tr_pbmn (개인)
-        latest = output[0] if isinstance(output, list) else output
+        # KIS는 장중 당일 행을 빈 문자열로 반환 → 값이 있는 첫 행 사용
+        rows = output if isinstance(output, list) else [output]
+        target = None
+        for row in rows:
+            val = row.get("frgn_ntby_tr_pbmn")
+            if val not in ("", None, "0"):
+                target = row
+                break
+        if target is None:
+            target = rows[0]
+
+        # KIS 투자자 순매수 거래대금은 백만원 단위 → 원 단위로 변환
         return {
-            "foreigner": int(latest.get("frgn_ntby_tr_pbmn", 0) or 0),
-            "institution": int(latest.get("orgn_ntby_tr_pbmn", 0) or 0),
-            "individual": int(latest.get("prsn_ntby_tr_pbmn", 0) or 0),
+            "foreigner": int(target.get("frgn_ntby_tr_pbmn", 0) or 0) * 1_000_000,
+            "institution": int(target.get("orgn_ntby_tr_pbmn", 0) or 0) * 1_000_000,
+            "individual": int(target.get("prsn_ntby_tr_pbmn", 0) or 0) * 1_000_000,
         }
     except Exception as e:
         logger.warning("investor_trend_exception", code=code, error=str(e))
@@ -423,6 +441,8 @@ async def fetch_index_investor_trend(index_code: str) -> dict:
         "fid_cond_scr_div_code": "20440",
         "fid_input_iscd": index_code,
         "fid_div_cls_code": "0",
+        "fid_rank_sort_cls_code": "0",
+        "fid_etc_cls_code": "0",
     }
 
     try:
@@ -435,14 +455,30 @@ async def fetch_index_investor_trend(index_code: str) -> dict:
                 logger.warning("index_inv_api_error", code=index_code, msg=data.get("msg1", "")[:60])
                 return {"foreigner": 0, "institution": 0, "individual": 0}
 
+        # KIS 지수 수급은 output 혹은 output1/output2 에 담길 수 있음
         output = data.get("output", [])
+        if not output and "output1" in data:
+            output = data["output1"]
+        
         if not output:
             return {"foreigner": 0, "institution": 0, "individual": 0}
-        latest = output[0] if isinstance(output, list) else output
+            
+        rows = output if isinstance(output, list) else [output]
+        target = None
+        for row in rows:
+            val = row.get("frgn_ntby_tr_pbmn")
+            if val not in ("", None, "0"):
+                target = row
+                break
+        
+        if target is None:
+            target = rows[0]
+
+        # KIS 지수 수급은 보통 억 단위임
         return {
-            "foreigner": int(latest.get("frgn_ntby_tr_pbmn", 0) or 0),
-            "institution": int(latest.get("orgn_ntby_tr_pbmn", 0) or 0),
-            "individual": int(latest.get("prsn_ntby_tr_pbmn", 0) or 0),
+            "foreigner": int(float(target.get("frgn_ntby_tr_pbmn", 0) or 0) * 100_000_000),
+            "institution": int(float(target.get("orgn_ntby_tr_pbmn", 0) or 0) * 100_000_000),
+            "individual": int(float(target.get("prsn_ntby_tr_pbmn", 0) or 0) * 100_000_000),
         }
     except Exception as e:
         logger.warning("index_investor_exception", code=index_code, error=str(e))

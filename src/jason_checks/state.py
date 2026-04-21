@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Set
 from collections import deque
 
 
@@ -57,6 +57,13 @@ class AppState:
     ws_connected: bool = False
     rest_ok: bool = False
     current_rest_rps: float = 0.0
+    
+    # Track which codes are currently on the user's screen (for prioritized polling)
+    visible_codes: Set[str] = field(default_factory=set)
+
+    def set_visible_codes(self, codes: list[str]) -> None:
+        """Update the set of codes currently visible on the UI."""
+        self.visible_codes = set(codes)
 
     def get_or_create_stock(self, code: str) -> StockState:
         """Get or create stock state."""

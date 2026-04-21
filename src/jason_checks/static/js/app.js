@@ -180,7 +180,10 @@ function timaApp() {
                 const response = await fetch(`/api/themes?sort=${this.sortMode}&pinned=${pinnedStr}`);
                 const data = await response.json();
 
-                this.wsConnected = data.ws_connected || false;
+                // Only update wsConnected from API if we don't have a local active socket
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    this.wsConnected = data.ws_connected || false;
+                }
                 this.mode = data.mode || 'paper';
 
                 // Themes returned in order from backend (pinned first, then top 4)
@@ -270,6 +273,30 @@ function timaApp() {
                     }
                 }, 30000);
 
+                return;
+            }
+
+            if (msg.type === 'investor') {
+                const code = msg.code;
+                if (!this.stocks[code]) this.stocks[code] = { code: code };
+                this.stocks[code].investor_foreigner = msg.foreigner;
+                this.stocks[code].investor_institution = msg.institution;
+                this.stocks[code].investor_individual = msg.individual;
+                this.updateThemesWithTick(code);
+                return;
+            }
+
+            if (msg.type === 'index') {
+                const code = msg.code;
+                this.indices[code] = {
+                    name: msg.name,
+                    price: msg.price,
+                    change_pct: msg.change_pct,
+                    change_value: msg.change_value,
+                    investor_foreigner: msg.foreigner,
+                    investor_institution: msg.institution,
+                    investor_individual: msg.individual,
+                };
                 return;
             }
         },

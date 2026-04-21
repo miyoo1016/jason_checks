@@ -184,6 +184,31 @@ async def _theme_rank_supplement_loop(app):
         await asyncio.sleep(30)
 
 
+async def _get_initial_themes_by_movers(theme_data: dict) -> list:
+    """REST top_movers로 오늘 강세 테마를 파악해 초기 active themes 설정."""
+    from jason_checks.kis_rest import fetch_top_movers
+    try:
+        movers = await fetch_top_movers(market="J", sort="0", limit=100)
+        code_to_pct = {m["code"]: m["change_pct"] for m in movers}
+
+        theme_scores = {}
+        for theme_code, config in theme_data.items():
+            stocks = config.get("stocks", [])[:5]
+            pcts = [code_to_pct[s["code"]] for s in stocks if s["code"] in code_to_pct]
+            if pcts:
+                theme_scores[theme_code] = sum(pcts) / len(pcts)
+
+        sorted_themes = sorted(theme_scores.items(), key=lambda x: x[1], reverse=True)
+        top4 = [code for code, _ in sorted_themes[:4]]
+        fallback = [t for t in theme_data.keys() if t not in top4]
+        result = (top4 + fallback)[:4]
+        logger.info("initial_themes_by_movers", themes=result)
+        return result
+    except Exception as e:
+        logger.warning("initial_theme_fetch_failed", error=str(e))
+        return list(theme_data.keys())[:4]
+
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI app."""
     app = FastAPI(
@@ -215,7 +240,8 @@ def create_app() -> FastAPI:
         settings = get_settings()
         logger.info("mode", mode=settings.kis_mode)
         try:
-            initial_themes = list(app.theme_data.keys())[:4]
+            # REST top_movers로 오늘 강세 테마를 파악해 초기 active themes 결정
+            initial_themes = await _get_initial_themes_by_movers(app.theme_data)
             # Use expanded subscription: active themes + 1 per inactive theme
             codes_to_sub = get_expanded_subscription_codes(
                 app.theme_data, initial_themes, max_codes=40

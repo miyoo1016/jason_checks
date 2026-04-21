@@ -51,18 +51,24 @@ class WSBridge:
 
                 async for tick in self.kis_ws.stream():
                     stock = app_state.get_or_create_stock(tick.code)
-                    app_state.update_stock(
-                        tick.code,
-                        price=tick.price,
-                        change_pct=tick.change_pct,
-                        cum_volume_krw=tick.cumulative_volume,
-                        cumulative_trading_value=tick.cumulative_trading_value,
-                        execution_strength=tick.strength,
-                        market=tick.market,
-                    )
+
+                    # strength=0인 틱(주로 H0UNCNT0 잘못된 파싱)이 기존 KRX 값을 덮어쓰지 않도록
+                    update_kwargs = {
+                        "price": tick.price,
+                        "change_pct": tick.change_pct,
+                        "cum_volume_krw": tick.cumulative_volume,
+                        "cumulative_trading_value": tick.cumulative_trading_value,
+                        "market": tick.market,
+                    }
+                    if tick.strength > 0:
+                        update_kwargs["execution_strength"] = tick.strength
+                    app_state.update_stock(tick.code, **update_kwargs)
 
                     update_volume_window(stock, tick)
                     surge_detected = detect_surge(stock)
+
+                    # broadcast에는 실제 strength 사용 (0이면 기존 app_state 값)
+                    display_strength = tick.strength if tick.strength > 0 else stock.execution_strength
 
                     msg = {
                         "type": "tick",
@@ -70,7 +76,7 @@ class WSBridge:
                         "price": tick.price,
                         "change_pct": tick.change_pct,
                         "cumulative_volume": tick.cumulative_volume,
-                        "strength": tick.strength,
+                        "strength": display_strength,
                         "timestamp": tick.timestamp,
                         "market": tick.market,
                     }
@@ -113,6 +119,32 @@ class WSBridge:
                 retry_delay = min(retry_delay * 2, max_delay)
             logger.info("kis_reconnect_waiting", seconds=wait)
             await asyncio.sleep(wait)
+
+    async def broadcast_investor_update(self, code: str, data: dict) -> None:
+        """Broadcast investor trend update (polled from REST) to all clients instantly."""
+        msg = {
+            "type": "investor",
+            "code": code,
+            "foreigner": data.get("foreigner", 0),
+            "institution": data.get("institution", 0),
+            "individual": data.get("individual", 0),
+        }
+        await self._broadcast(json.dumps(msg))
+
+    async def broadcast_index_update(self, code: str, data: dict) -> None:
+        """Broadcast market index update instantly."""
+        msg = {
+            "type": "index",
+            "code": code,
+            "name": data.get("name", ""),
+            "price": data.get("price", 0),
+            "change_pct": data.get("change_pct", 0),
+            "change_value": data.get("change_value", 0),
+            "foreigner": data.get("investor_foreigner", 0),
+            "institution": data.get("investor_institution", 0),
+            "individual": data.get("investor_individual", 0),
+        }
+        await self._broadcast(json.dumps(msg))
 
     async def _broadcast(self, message: str) -> None:
         """Broadcast message to all connected clients."""
