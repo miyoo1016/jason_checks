@@ -208,6 +208,32 @@ header {
     background-color: var(--bg-tertiary);
 }
 
+.copy-all-btn {
+    padding: 0.5rem 0.875rem;
+    border-radius: 8px;
+    border: 1px solid var(--border-light);
+    background-color: var(--text-primary);
+    color: #FFFFFF;
+    font-size: 0.75rem;
+    font-weight: 800;
+    min-width: 76px;
+    transition: all 0.2s ease;
+}
+
+.copy-all-btn:hover {
+    background-color: #1E293B;
+}
+
+.copy-all-btn.success {
+    background-color: #16A34A;
+    border-color: #16A34A;
+}
+
+.copy-all-btn.error {
+    background-color: #DC2626;
+    border-color: #DC2626;
+}
+
 /* Individual Surge Panel */
 .surge-panel {
     background-color: var(--bg-secondary);
@@ -229,6 +255,60 @@ header {
     border-color: var(--accent);
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
+}
+
+.dual-horizon-panel {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    padding: 1rem;
+    box-shadow: var(--shadow-sm);
+}
+
+.dual-horizon-title {
+    font-size: 0.75rem;
+    font-weight: 800;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.dual-horizon-item {
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+    padding: 0.625rem;
+}
+
+.dual-horizon-item.overlap {
+    border-color: #93C5FD;
+    background-color: #EFF6FF;
+}
+
+.dual-horizon-label {
+    flex-shrink: 0;
+    align-self: flex-start;
+    padding: 0.125rem 0.375rem;
+    border-radius: 6px;
+    background-color: #E0F2FE;
+    color: #0369A1;
+    font-size: 0.5rem;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
+.dual-horizon-label.overlap {
+    background-color: #DBEAFE;
+    color: #1D4ED8;
+}
+
+.dual-horizon-empty {
+    border: 1px dashed var(--border-medium);
+    border-radius: 8px;
+    padding: 0.875rem;
+    color: var(--text-muted);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-align: center;
 }
 
 /* Theme Aggregate Change % Pill (avg_change_pct display) */

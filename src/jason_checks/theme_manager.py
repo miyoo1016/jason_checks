@@ -95,10 +95,23 @@ def select_leaders(
             "name": stock_info["name"],
             "score": score,
             "tick": tick,
+            "tier": stock_info.get("tier", ""),
+            "alert_type": stock_info.get("alert_type", ""),
+            "rs": stock_info.get("rs", ""),
+            "vcp_status": stock_info.get("vcp_status", ""),
+            "box_upper_price": stock_info.get("box_upper_price", ""),
+            "short_swing_score": stock_info.get("short_swing_score", "-"),
+            "position_swing_score": stock_info.get("position_swing_score", "-"),
+            "horizon_label": stock_info.get("horizon_label", "-"),
+            "short_reasons": stock_info.get("short_reasons", "-"),
+            "position_reasons": stock_info.get("position_reasons", "-"),
         })
 
-    # Sort by score descending, take top 4
+    # Sort by score descending, take top 4. AlphaForge candidates are already
+    # pre-filtered upstream, so keep the whole candidate set visible.
     scored.sort(key=lambda x: x["score"], reverse=True)
+    if theme_code == "AlphaForge":
+        return scored
     return scored[:4]
 
 

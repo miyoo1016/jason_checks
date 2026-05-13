@@ -13,7 +13,7 @@ class StockState:
     code: str
     price: float = 0.0
     change_pct: float = 0.0
-    cum_volume_krw: int = 0
+    cumulative_volume: int = 0
     cumulative_trading_value: int = 0
     execution_strength: float = 0.0
     bid_ask_ratio: float = 0.5
@@ -26,6 +26,12 @@ class StockState:
     investor_institution: int = 0
     investor_individual: int = 0
     investor_updated_ts: datetime = field(default_factory=datetime.now)
+    # Candidate-only KIS REST supply snapshot. None means not received.
+    foreign_flow: int | None = None
+    institution_flow: int | None = None
+    individual_flow: int | None = None
+    supply_status: str = "DATA_NA"
+    supply_updated_at: str = ""
     # Volume surge detection (5-min rolling window)
     volume_history: deque = field(default_factory=lambda: deque(maxlen=5))
     surge_active: bool = False

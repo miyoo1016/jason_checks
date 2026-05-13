@@ -6,6 +6,7 @@ from typing import Dict, Set
 from fastapi import WebSocket
 import structlog
 
+from datetime import datetime
 from jason_checks.kis_ws import get_ws, ExecutionTick
 from jason_checks.state import app_state
 from jason_checks.surge_detector import update_volume_window, detect_surge
@@ -31,88 +32,131 @@ class WSBridge:
             return
 
         self.running = True
-        # Start background stream task with codes
+        # Start two independent tasks: one for WS, one for REST
         self.stream_task = asyncio.create_task(self._stream_loop(codes))
+        asyncio.create_task(self._rest_fallback_loop())
 
-    async def _stream_loop(self, codes: list[str]) -> None:
-        """Stream KIS ticks and broadcast with proper retry backoff."""
+    async def _stream_loop(self, initial_codes: list[str]) -> None:
+        """Stream KIS ticks with aggressive reconnection and zombie flushing."""
         retry_delay = 1
-        max_delay = 30
-
         while self.running:
-            stream_ok = False
             try:
-                logger.info("kis_connect_start")
                 await self.kis_ws.connect()
-                await self.kis_ws.subscribe(codes)
+                current_codes = list(app_state.stocks.keys())
+                if not current_codes:
+                    current_codes = initial_codes
+                
+                # Proactively flush current target codes to clear zombie slots
+                if current_codes:
+                    await self.kis_ws.flush_all(current_codes)
+                
+                await self.kis_ws.subscribe(current_codes)
                 app_state.ws_connected = True
-                logger.info("kis_connected")
-                retry_delay = 1
-
+                
                 async for tick in self.kis_ws.stream():
-                    stock = app_state.get_or_create_stock(tick.code)
-                    app_state.update_stock(
-                        tick.code,
-                        price=tick.price,
-                        change_pct=tick.change_pct,
-                        cum_volume_krw=tick.cumulative_volume,
-                        cumulative_trading_value=tick.cumulative_trading_value,
-                        execution_strength=tick.strength,
-                        market=tick.market,
-                    )
-
-                    update_volume_window(stock, tick)
-                    surge_detected = detect_surge(stock)
-
-                    msg = {
-                        "type": "tick",
-                        "code": tick.code,
-                        "price": tick.price,
-                        "change_pct": tick.change_pct,
-                        "cumulative_volume": tick.cumulative_volume,
-                        "strength": tick.strength,
-                        "timestamp": tick.timestamp,
-                        "market": tick.market,
-                    }
-                    await self._broadcast(json.dumps(msg))
-
-                    if surge_detected:
-                        surge_msg = {
-                            "type": "surge",
-                            "code": tick.code,
-                            "price": tick.price,
-                            "volume": tick.volume,
-                            "timestamp": tick.timestamp,
-                        }
-                        await self._broadcast(json.dumps(surge_msg))
-
-                # async for exited without exception (stream broke cleanly)
-                stream_ok = True
-                logger.warning("kis_stream_ended_normally")
-
-            except asyncio.CancelledError:
-                logger.info("stream_loop_cancelled")
-                app_state.ws_connected = False
-                break
+                    self._update_and_broadcast(tick)
             except Exception as e:
-                logger.error("stream_loop_error", error=str(e))
+                logger.warning("ws_stream_error", error=str(e))
+                app_state.ws_connected = False
+            await asyncio.sleep(5) # Constant retry interval
 
-            # Disconnected state
-            app_state.ws_connected = False
+    async def _rest_fallback_loop(self):
+        """Poll REST API independently every 10s as a hard guarantee of movement."""
+        from jason_checks.kis_rest import fetch_current_price, fetch_investor_data
+        while self.running:
             try:
-                await self.kis_ws.close()
-            except Exception:
-                pass
+                # SAFE ACCESS: Get active codes from the shared app_state
+                active_codes = list(app_state.stocks.keys())
+                
+                if not active_codes:
+                    active_codes = ["005930", "000660", "042700", "403870"]
 
-            if not self.running:
-                break
+                logger.info("hard_fallback_polling", count=len(active_codes))
+                for code in active_codes:
+                    if not self.running: break
+                    try:
+                        # Parallel fetch with timeout to prevent stalling
+                        tasks = [
+                            asyncio.wait_for(fetch_current_price(code), timeout=3.0),
+                            asyncio.wait_for(fetch_investor_data(code), timeout=3.0)
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        
+                        data = results[0] if not isinstance(results[0], Exception) else None
+                        inv_data = results[1] if not isinstance(results[1], Exception) else None
+                        
+                        if data:
+                            tick = ExecutionTick(
+                                code=code,
+                                price=data["price"],
+                                change_pct=data["change_pct"],
+                                volume=0,
+                                cumulative_volume=data["volume"],
+                                cumulative_trading_value=data.get("trading_value", 0),
+                                strength=data.get("strength", 100.0),
+                                timestamp=datetime.now().strftime("%H%M%S"),
+                                market="J"
+                            )
+                            # Update with investor data if available (with non-zero protection)
+                            if inv_data and isinstance(inv_data, dict):
+                                inv_update = {}
+                                if inv_data.get("foreign", 0) != 0 or stock.investor_foreigner == 0:
+                                    inv_update["investor_foreigner"] = inv_data.get("foreign", 0)
+                                if inv_data.get("institution", 0) != 0 or stock.investor_institution == 0:
+                                    inv_update["investor_institution"] = inv_data.get("institution", 0)
+                                if inv_data.get("individual", 0) != 0 or stock.investor_individual == 0:
+                                    inv_update["investor_individual"] = inv_data.get("individual", 0)
+                                
+                                if inv_update:
+                                    app_state.update_stock(code, **inv_update)
+                            
+                            self._update_and_broadcast(tick)
+                    except Exception: pass
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning("hard_fallback_error", error=str(e))
+            await asyncio.sleep(5)
 
-            # Backoff (even on normal end, to prevent server hammering)
-            wait = 3 if stream_ok else retry_delay
-            if not stream_ok:
-                retry_delay = min(retry_delay * 2, max_delay)
-            logger.info("kis_reconnect_waiting", seconds=wait)
-            await asyncio.sleep(wait)
+    def _update_and_broadcast(self, tick: ExecutionTick):
+        """Internal helper to update state and broadcast to UI."""
+        stock = app_state.get_or_create_stock(tick.code)
+        
+        # Update volume history and detect surge
+        update_volume_window(stock, tick)
+        is_surge = detect_surge(stock)
+        
+        # Retain previous non-zero strength if current tick has 0
+        final_strength = tick.strength if tick.strength > 0 else stock.execution_strength
+        if final_strength == 0: final_strength = 100.0 # Default if everything is 0
+        
+        app_state.update_stock(
+            tick.code,
+            price=tick.price,
+            change_pct=tick.change_pct,
+            cumulative_volume=tick.cumulative_volume,
+            cumulative_trading_value=tick.cumulative_trading_value,
+            execution_strength=final_strength,
+            market=tick.market,
+        )
+        msg = {
+            "type": "tick",
+            "code": tick.code,
+            "price": tick.price,
+            "change_pct": tick.change_pct,
+            "cumulative_volume": tick.cumulative_volume,
+            "cumulative_trading_value": tick.cumulative_trading_value,
+            "strength": final_strength,
+            "timestamp": tick.timestamp,
+            "surge_active": stock.surge_active,
+            # ADDED: Include investor trends in the broadcast message
+            "investor_foreigner": stock.investor_foreigner,
+            "investor_institution": stock.investor_institution,
+            "investor_individual": stock.investor_individual,
+        }
+        asyncio.create_task(self._broadcast(json.dumps(msg)))
+        # LOG AND PRINT FOR FINAL VERIFICATION
+        print(f"DEBUG_BROADCAST: {tick.code} P:{tick.price} S:{tick.strength} F:{msg['investor_foreigner']}")
+        logger.info("broadcast_tick", code=tick.code, price=tick.price, strength=tick.strength, foreign=msg["investor_foreigner"])
 
     async def _broadcast(self, message: str) -> None:
         """Broadcast message to all connected clients."""

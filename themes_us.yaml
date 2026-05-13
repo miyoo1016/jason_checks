@@ -1,0 +1,118 @@
+# CHECKS Terminal - US Market Theme Pool
+# KIS US Real-time Data Mapping
+
+themes:
+  지수ETF:
+    display_name: "Index ETF"
+    description: "Market Index Tracking ETFs"
+    stocks:
+      - code: "QQQ"
+        name: "Nasdaq 100"
+      - code: "SPY"
+        name: "S&P 500"
+      - code: "SOXL"
+        name: "Semiconductor 3x"
+      - code: "DIA"
+        name: "Dow Jones ETF"
+
+  반도체:
+    display_name: "반도체"
+    description: "Semiconductors / AI Chips"
+    stocks:
+      - code: "NVDA"
+        name: "NVIDIA"
+      - code: "AMD"
+        name: "AMD"
+      - code: "AVGO"
+        name: "Broadcom"
+      - code: "ASML"
+        name: "ASML"
+      - code: "AMAT"
+        name: "Applied Materials"
+      - code: "MU"
+        name: "Micron"
+      - code: "ARM"
+        name: "Arm Holdings"
+
+  빅테크:
+    display_name: "빅테크"
+    description: "Big Tech / Mag 7"
+    stocks:
+      - code: "AAPL"
+        name: "Apple"
+      - code: "MSFT"
+        name: "Microsoft"
+      - code: "GOOGL"
+        name: "Alphabet"
+      - code: "AMZN"
+        name: "Amazon"
+      - code: "META"
+        name: "Meta"
+      - code: "TSLA"
+        name: "Tesla"
+      - code: "NFLX"
+        name: "Netflix"
+
+  AI/소프트웨어:
+    display_name: "AI/SaaS"
+    description: "AI Platforms / Cloud"
+    stocks:
+      - code: "PLTR"
+        name: "Palantir"
+      - code: "CRM"
+        name: "Salesforce"
+      - code: "NOW"
+        name: "ServiceNow"
+      - code: "SNOW"
+        name: "Snowflake"
+      - code: "ADBE"
+        name: "Adobe"
+      - code: "ORCL"
+        name: "Oracle"
+
+  에너지/전기차:
+    display_name: "에너지/EV"
+    description: "EV / Clean Energy"
+    stocks:
+      - code: "TSLA"
+        name: "Tesla"
+      - code: "RIVN"
+        name: "Rivian"
+      - code: "LCID"
+        name: "Lucid"
+      - code: "FSLR"
+        name: "First Solar"
+      - code: "ENPH"
+        name: "Enphase Energy"
+
+  금융:
+    display_name: "금융"
+    description: "US Banks / Finance"
+    stocks:
+      - code: "JPM"
+        name: "JPMorgan"
+      - code: "BAC"
+        name: "Bank of America"
+      - code: "GS"
+        name: "Goldman Sachs"
+      - code: "MS"
+        name: "Morgan Stanley"
+      - code: "V"
+        name: "Visa"
+      - code: "MA"
+        name: "Mastercard"
+
+  헬스케어:
+    display_name: "헬스케어"
+    description: "Healthcare / Bio"
+    stocks:
+      - code: "LLY"
+        name: "Eli Lilly"
+      - code: "NVO"
+        name: "Novo Nordisk"
+      - code: "UNH"
+        name: "UnitedHealth"
+      - code: "JNJ"
+        name: "Johnson & Johnson"
+      - code: "MRK"
+        name: "Merck"
