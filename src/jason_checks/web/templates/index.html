@@ -58,20 +58,21 @@
         </header>
         
         <!-- Market Index Bar (KOSPI / KOSDAQ) -->
-        <div class="bg-white border-b border-gray-200 py-3 sticky top-[73px] z-10 shadow-sm">
-            <div class="max-w-7xl mx-auto px-4 grid grid-cols-2 gap-8">
+        <div class="bg-white border-b border-gray-200 py-2 sticky top-[73px] z-10 shadow-sm">
+            <div class="max-w-7xl mx-auto px-4 grid grid-cols-1 md:grid-cols-2 gap-3">
                 <template x-for="code in Object.keys(indices)" :key="code">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-3">
-                            <span class="text-xl font-black tracking-tighter" x-text="indices[code]?.name"></span>
-                            <span class="text-lg mono font-bold"
+                    <div class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <span class="text-sm font-black tracking-tighter" x-text="indices[code]?.name"></span>
+                            <span class="text-sm mono font-bold"
                                   :class="{'up': (indices[code]?.change_pct || 0) > 0, 'down': (indices[code]?.change_pct || 0) < 0}"
                                   x-text="(indices[code]?.price || 0).toFixed(2)"></span>
-                            <span class="text-sm mono font-bold"
+                            <span class="text-xs mono font-bold"
                                   :class="{'up': (indices[code]?.change_pct || 0) > 0, 'down': (indices[code]?.change_pct || 0) < 0}"
                                   x-text="`${(indices[code]?.change_pct || 0) >= 0 ? '▲' : '▼'} ${Math.abs(indices[code]?.change_pct || 0).toFixed(2)}%`"></span>
                         </div>
-                        <div class="flex items-center gap-3 text-[11px] mono font-bold">
+                        <div class="w-28 h-8 flex-shrink-0" x-html="sparklineSvg(indexChart(indices[code], code), 112, 32)"></div>
+                        <div class="hidden lg:flex items-center gap-1 text-[10px] mono font-bold">
                             <span class="px-1.5 py-0.5 rounded bg-red-50" :class="indexSupplyClass(indices[code], 'investor_foreigner')"
                                   x-text="`외 ${formatIndexSupplyFlow(indices[code], 'investor_foreigner')}`"></span>
                             <span class="px-1.5 py-0.5 rounded bg-blue-50" :class="indexSupplyClass(indices[code], 'investor_institution')"
@@ -108,13 +109,13 @@
         </div>
 
         <!-- Main Content -->
-        <main class="max-w-7xl mx-auto p-4 md:p-6">
+        <main class="max-w-[1600px] mx-auto p-3 md:p-4">
             <!-- DASHBOARD TAB -->
             <template x-if="currentTab === 'dashboard'">
                 <div>
                     <!-- Status Bar -->
-                    <div class="mb-6 p-4 rounded-xl border bg-white shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
-                        <div class="flex gap-6 text-xs font-bold uppercase tracking-wider">
+                    <div class="mb-2 p-2 rounded-lg border bg-white shadow-sm flex flex-col md:flex-row justify-between items-center gap-2">
+                        <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold uppercase tracking-wider">
                             <div>
                                 <span x-show="wsConnected" class="text-green-600">🟢 WS:OK</span>
                                 <span x-show="!wsConnected" class="text-red-500">🔴 WS:OFFLINE</span>
@@ -123,11 +124,21 @@
                             <div x-text="`TYPE: ${mode.toUpperCase()}`"></div>
                             <div x-show="marketOpen()" class="text-blue-600">MARKET OPEN</div>
                             <div x-show="!marketOpen()" class="text-amber-600">MARKET CLOSED</div>
+                            <div class="text-emerald-700 normal-case" x-text="quoteLoadText()"></div>
+                            <div class="text-gray-500 normal-case" x-text="`마지막 갱신: ${formatClock(quotePolling.updated_at || quotePolling.completed_at)}`"></div>
+                            <div class="text-gray-500 normal-case" x-text="quoteEtaText()"></div>
+                            <div x-show="supplyDataReason" class="text-gray-400 normal-case"
+                                 x-text="`수급 DATA_NA: ${supplyDataReason}`"></div>
                             <div x-show="alphaforgeCandidatesLoaded > 0" class="text-blue-600 normal-case"
                                  x-text="`AlphaForge 후보 로드: ${alphaforgeCandidatesLoaded}개 / ${alphaforgeCandidatesGeneratedAt || '-'}`"></div>
                         </div>
                         <!-- Sort Toggle -->
                         <div class="flex gap-2">
+                            <button @click="setSortMode('default')"
+                                    :class="sortMode === 'default' ? 'active' : ''"
+                                    class="sort-btn">
+                                기본
+                            </button>
                             <button @click="setSortMode('strength')"
                                     :class="sortMode === 'strength' ? 'active' : ''"
                                     class="sort-btn">
@@ -146,128 +157,117 @@
                         </div>
                     </div>
 
-                    <!-- Theme Grid (2x2 responsive) -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                        <template x-for="(themeData, themeName) in themes" :key="themeName">
-                            <div class="theme-card">
-                                <!-- Theme Header -->
-                                <div class="mb-3 pb-2 border-b border-gray-100">
-                                    <div class="flex justify-between items-start">
-                                        <div class="flex items-center gap-2 min-w-0">
-                                            <h2 class="text-base font-bold truncate" x-text="themeData.display_name"></h2>
-                                            <span class="theme-pct-pill mono"
-                                                  :class="{
-                                                     'up': (themeData.avg_change_pct || 0) >= 0,
-                                                     'down': (themeData.avg_change_pct || 0) < 0
-                                                   }"
-                                                  x-text="`${(themeData.avg_change_pct || 0) >= 0 ? '+' : ''}${(themeData.avg_change_pct || 0).toFixed(2)}`">
-                                            </span>
+                    <!-- Theme Grid (compact responsive) -->
+                    <template x-if="Object.keys(themes || {}).length === 0">
+                        <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"
+                             x-text="`산업군 데이터 없음${themeLoadReason ? ': ' + themeLoadReason : ''}`"></div>
+                    </template>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-2 mb-4">
+                        <div class="theme-card" style="padding: 0.45rem; border-radius: 7px;">
+                            <div class="mb-1.5 pb-1.5 border-b border-gray-100">
+                                <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-1.5 items-center">
+                                    <h2 class="text-[12px] font-black truncate">AlphaForge Picks</h2>
+                                    <span class="mono text-[9px] font-black text-blue-700 bg-blue-50 rounded px-1.5 py-0.5"
+                                          x-text="`${alphaForgePicks().length}개`"></span>
+                                </div>
+                            </div>
+                            <div class="space-y-0.5">
+                                <template x-for="stock in alphaForgePicks().slice(0, 5)" :key="`af-grid-${stock.code}`">
+                                    <div class="stock-row"
+                                         :class="{ 'limit-up': stock.change_pct >= 29.5, 'opacity-50': !isLiveStock(stock) }"
+                                         style="padding: 0.23rem 0.35rem; margin-bottom: 0.125rem; border-radius: 5px;">
+                                        <div class="grid grid-cols-[minmax(0,1fr)_52px_44px_44px] gap-1.5 items-center leading-tight">
+                                            <div class="min-w-0 flex items-baseline gap-1">
+                                                <span class="text-[10px] font-black truncate" x-text="stock.name"></span>
+                                                <span class="text-[7px] text-gray-400 mono flex-shrink-0" x-text="stock.code"></span>
+                                            </div>
+                                            <div class="text-right text-[10px] mono font-black"
+                                                 :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                 x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') : '-'"></div>
+                                            <div class="text-right text-[9px] mono font-black"
+                                                 :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                 x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></div>
+                                            <div class="text-right text-[9px] mono font-black text-gray-600"
+                                                 x-text="isLiveStock(stock) ? formatTradingValue(stock.cumulative_trading_value) : '-'"></div>
                                         </div>
-                                        <button @click="togglePin(themeName)" class="star-icon text-xl flex-shrink-0"
+                                        <div class="mt-0.5 grid grid-cols-[minmax(0,1fr)_64px] gap-1 items-center leading-none">
+                                            <div class="min-w-0 flex gap-1 text-[7px] font-black">
+                                                <span class="px-1 py-0.5 rounded bg-blue-50 text-blue-700 truncate"
+                                                      x-text="stock.alert_type || '-'"></span>
+                                                <span class="px-1 py-0.5 rounded bg-green-50 text-green-700"
+                                                      x-text="`RS ${stock.rs ?? '-'}`"></span>
+                                                <span class="px-1 py-0.5 rounded bg-purple-50 text-purple-700 truncate"
+                                                      x-text="stock.vcp_status || '-'"></span>
+                                            </div>
+                                            <div class="w-[64px] h-[18px] justify-self-end" x-html="sparklineSvg(stockChart(stock), 64, 18)"></div>
+                                        </div>
+                                        <div class="mt-0.5 flex justify-between gap-1 text-[8px] mono font-black">
+                                            <span :class="{
+                                                     'text-gray-500': intradayDecision(stock).decision === 'MARKET_CLOSED' || intradayDecision(stock).decision === 'DATA_WAIT',
+                                                     'text-amber-700': intradayDecision(stock).decision === 'IN_BOX_WAIT' || intradayDecision(stock).decision === 'BREAKOUT_WATCH',
+                                                     'text-green-700': intradayDecision(stock).decision === 'ENTRY_OK',
+                                                     'text-red-600': intradayDecision(stock).decision === 'FAKEOUT_RISK'
+                                                   }"
+                                                  x-text="`DECISION ${intradayDecision(stock).decision}`"></span>
+                                            <span class="text-amber-700" x-text="`BOX ${formatBoxPrice(stock.box_upper_price)}`"></span>
+                                        </div>
+                                    </div>
+                                </template>
+                                <template x-if="alphaForgePicks().length === 0">
+                                    <div class="dual-horizon-empty">후보 대기</div>
+                                </template>
+                            </div>
+                        </div>
+                        <template x-for="entry in sortedThemeEntries()" :key="entry[0]">
+                            <div class="theme-card" x-data="{ themeName: entry[0], themeData: entry[1] }"
+                                 style="padding: 0.45rem; border-radius: 7px;">
+                                <!-- Theme Header -->
+                                <div class="mb-1.5 pb-1.5 border-b border-gray-100">
+                                    <div class="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-1.5 items-center">
+                                        <h2 class="text-[12px] font-black truncate" x-text="themeData.display_name"></h2>
+                                        <span class="mono text-[10px] font-black px-1.5 py-0.5 rounded bg-gray-50"
+                                              :class="{
+                                                 'up': (themeData.avg_change_pct || 0) >= 0,
+                                                 'down': (themeData.avg_change_pct || 0) < 0
+                                               }"
+                                              x-text="`${(themeData.avg_change_pct || 0) >= 0 ? '+' : ''}${(themeData.avg_change_pct || 0).toFixed(2)}%`">
+                                        </span>
+                                        <span class="mono text-[9px] font-black text-gray-500"
+                                              x-text="`S ${(themeData.strength || 0).toFixed(0)}`"></span>
+                                        <button @click="togglePin(themeName)" class="star-icon text-sm leading-none flex-shrink-0"
                                                 :class="{ 'pinned': isPinned(themeName) }">
                                             <span x-text="isPinned(themeName) ? '★' : '☆'"></span>
                                         </button>
                                     </div>
-                                    <div class="mt-2 flex items-center gap-2">
-                                        <span class="text-[10px] font-bold text-gray-400">강도</span>
-                                        <div class="theme-strength-bar flex-1">
-                                            <div class="theme-strength-bar-fill"
-                                                 :style="`width: ${Math.min((themeData.strength || 0) / 5, 100)}%`">
-                                            </div>
-                                        </div>
-                                        <span class="text-[10px] font-bold mono text-gray-500"
-                                              x-text="`${(themeData.strength || 0).toFixed(1)}`"></span>
-                                    </div>
                                 </div>
 
                                 <!-- Stock Rows -->
-                                <div class="space-y-1">
-                                    <template x-for="(stock, idx) in (themeData.leaders || [])" :key="stock.code">
-                                        <div class="stock-row" :class="{ 'limit-up': stock.change_pct >= 29.5 }">
-                                            <div class="flex items-center gap-2">
-                                                <!-- Name + Code -->
-                                                <div class="flex-1 min-w-0">
-                                                    <div class="text-xs font-bold flex items-center truncate">
-                                                        <span x-text="stock.name"></span>
-                                                        <span x-show="stock.surge_active" class="surge-indicator">▲</span>
-                                                    </div>
-                                                    <div class="text-[9px] text-gray-400 mono" x-text="stock.code"></div>
-                                                    <div x-show="stock.tier || stock.alert_type || stock.rs || stock.vcp_status || stock.box_upper_price"
-                                                         class="mt-1 flex flex-wrap gap-1 text-[8px] font-black text-gray-500">
-                                                        <span x-show="stock.tier" class="px-1 py-0.5 rounded bg-gray-100" x-text="stock.tier"></span>
-                                                        <span x-show="stock.alert_type" class="px-1 py-0.5 rounded bg-blue-50 text-blue-700" x-text="stock.alert_type"></span>
-                                                        <span x-show="stock.rs !== '' && stock.rs !== undefined" class="px-1 py-0.5 rounded bg-green-50 text-green-700" x-text="`RS ${stock.rs}`"></span>
-                                                        <span x-show="stock.vcp_status" class="px-1 py-0.5 rounded bg-purple-50 text-purple-700" x-text="stock.vcp_status"></span>
-                                                        <span x-show="stock.box_upper_price !== '' && stock.box_upper_price !== undefined && stock.box_upper_price !== null" class="px-1 py-0.5 rounded bg-amber-50 text-amber-700" x-text="`BOX ${formatBoxPrice(stock.box_upper_price)}`"></span>
-                                                    </div>
-                                                    <div class="mt-1 text-[9px] leading-snug text-gray-500">
-                                                        <div class="font-black"
-                                                             x-text="`단기 ${stock.short_swing_score ?? '-'} / 중기 ${stock.position_swing_score ?? '-'} / ${horizonLabelKo(stock.horizon_label)}`"></div>
-                                                        <div class="truncate"
-                                                             x-text="`단기 사유: ${formatDecisionItems(stock.short_reasons)}`"></div>
-                                                        <div class="truncate"
-                                                             x-text="`중기 사유: ${formatDecisionItems(stock.position_reasons)}`"></div>
-                                                    </div>
-                                                    <div x-show="stock.tier || stock.alert_type || stock.vcp_status"
-                                                         class="mt-1 text-[9px] leading-snug">
-                                                        <div class="font-black mono"
-                                                             :class="{
-                                                                'text-gray-500': intradayDecision(stock).decision === 'MARKET_CLOSED' || intradayDecision(stock).decision === 'DATA_WAIT',
-                                                                'text-amber-700': intradayDecision(stock).decision === 'IN_BOX_WAIT' || intradayDecision(stock).decision === 'BREAKOUT_WATCH',
-                                                                'text-green-700': intradayDecision(stock).decision === 'ENTRY_OK',
-                                                                'text-red-600': intradayDecision(stock).decision === 'FAKEOUT_RISK'
-                                                             }"
-                                                             x-text="`DECISION: ${intradayDecision(stock).decision}`"></div>
-                                                        <div class="text-gray-500 truncate"
-                                                             x-text="`사유: ${formatDecisionItems(intradayDecision(stock).reasons)}`"></div>
-                                                        <div x-show="intradayDecision(stock).failed_conditions.length"
-                                                             class="text-gray-400 truncate"
-                                                             x-text="`미충족: ${formatDecisionItems(intradayDecision(stock).failed_conditions)}`"></div>
-                                                    </div>
+                                <div class="space-y-0.5">
+                                    <template x-for="stock in compactLeaders(themeData)" :key="stock.code">
+                                        <div class="stock-row"
+                                             :class="{ 'limit-up': stock.change_pct >= 29.5, 'opacity-50': !isLiveStock(stock) }"
+                                             style="padding: 0.23rem 0.35rem; margin-bottom: 0.125rem; border-radius: 5px;">
+                                            <div class="grid grid-cols-[minmax(0,1fr)_52px_44px_44px] gap-1.5 items-center leading-tight">
+                                                <div class="min-w-0 flex items-baseline gap-1">
+                                                    <span class="text-[10px] font-black truncate" x-text="stock.name"></span>
+                                                    <span x-show="stock.surge_active" class="surge-indicator">▲</span>
+                                                    <span class="text-[7px] text-gray-400 mono flex-shrink-0" x-text="stock.code"></span>
                                                 </div>
-                                                <!-- Price + Change -->
-                                                <div class="text-right flex-shrink-0 w-16">
-                                                    <div class="text-xs mono font-bold"
-                                                         :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
-                                                         x-text="stock.price ? stock.price.toLocaleString('ko-KR') : '-'"></div>
-                                                    <div class="text-[10px] font-black mono"
-                                                         :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
-                                                         x-text="`${(stock.change_pct || 0) >= 0 ? '▲' : '▼'} ${Math.abs(stock.change_pct || 0).toFixed(2)}%`"></div>
-                                                </div>
-
-                                                <!-- Investor Trend -->
-                                                <div class="flex-shrink-0 w-24 flex flex-col items-end gap-0.5 text-[9px] mono font-bold">
-                                                    <div :class="supplyFlowClass(stock, 'foreign_flow')"
-                                                          x-text="`외 ${formatSupplyFlow(stock, 'foreign_flow')}`"></div>
-                                                    <div :class="supplyFlowClass(stock, 'institution_flow')"
-                                                          x-text="`기 ${formatSupplyFlow(stock, 'institution_flow')}`"></div>
-                                                    <div :class="supplyFlowClass(stock, 'individual_flow')"
-                                                          x-text="`개 ${formatSupplyFlow(stock, 'individual_flow')}`"></div>
-                                                </div>
-
-                                                <!-- Strength -->
-                                                <div class="text-right flex-shrink-0 w-10">
-                                                    <div class="mono text-[11px] font-bold text-gray-800" x-text="`${(stock.strength || 0).toFixed(0)}`"></div>
-                                                    <div class="text-[8px] font-bold text-gray-400">강도</div>
-                                                </div>
-                                                <!-- Trading Value -->
-                                                <div class="text-right flex-shrink-0 w-14">
-                                                    <div class="mono text-[11px] font-bold text-gray-800">
-                                                        <span x-show="stock.cumulative_trading_value"
-                                                              x-text="`${(stock.cumulative_trading_value / 100000000).toFixed(0)}억`"></span>
-                                                        <span x-show="!stock.cumulative_trading_value">-</span>
-                                                    </div>
-                                                    <div class="text-[8px] font-black text-gray-500">대금</div>
-                                                </div>
+                                                <div class="text-right text-[10px] mono font-black"
+                                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                     x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') : '-'"></div>
+                                                <div class="text-right text-[9px] mono font-black"
+                                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                     x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></div>
+                                                <div class="text-right text-[9px] mono font-black text-gray-600"
+                                                     x-text="isLiveStock(stock) ? formatTradingValue(stock.cumulative_trading_value) : '-'"></div>
                                             </div>
-                                            <!-- Range Bar -->
-                                            <div class="range-bar-v2">
-                                                <div class="range-bar-center"></div>
-                                                <div class="range-bar-fill"
-                                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }"
-                                                     :style="`width: ${Math.min(Math.abs(stock.change_pct || 0) * 1.6, 50)}%;
-                                                              ${stock.change_pct >= 0 ? 'margin-left: 50%' : 'margin-right: 50%; margin-left: auto'}`">
-                                                </div>
+                                            <div class="mt-0.5 grid grid-cols-[46px_minmax(0,1fr)_64px] gap-1 items-center leading-none">
+                                                <span class="text-[8px] mono font-black text-gray-600"
+                                                      x-text="`체결 ${formatStrength(stock.strength)}`"></span>
+                                                <span class="text-[7px] text-gray-400 truncate"
+                                                      x-text="supplyBadge(stock)"></span>
+                                                <div class="w-[64px] h-[18px] justify-self-end" x-html="sparklineSvg(stockChart(stock), 64, 18)"></div>
                                             </div>
                                         </div>
                                     </template>
@@ -282,32 +282,7 @@
                             <h2 class="text-sm font-bold">Dual Horizon Scanner</h2>
                             <span class="text-[10px] font-bold text-gray-400" x-text="`AlphaForge ${alphaForgePicks().length} · Live ${liveMomentumPicks().length} · Overlap ${overlapPicks().length}`"></span>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <h3 class="dual-horizon-title">AlphaForge Picks</h3>
-                                <div class="space-y-1">
-                                    <template x-for="stock in alphaForgePicks()" :key="`af-${stock.code}`">
-                                        <div class="dual-horizon-item">
-                                            <div class="flex justify-between gap-2">
-                                                <div class="min-w-0">
-                                                    <div class="text-xs font-bold truncate" x-text="stock.name"></div>
-                                                    <div class="text-[9px] text-gray-400 mono" x-text="stock.code"></div>
-                                                </div>
-                                                <span class="dual-horizon-label" x-text="stock.horizon_setup_label"></span>
-                                            </div>
-                                            <div class="mt-1 flex flex-wrap gap-1 text-[8px] font-black">
-                                                <span class="px-1 py-0.5 rounded bg-gray-100" x-text="stock.tier || '-'"></span>
-                                                <span class="px-1 py-0.5 rounded bg-blue-50 text-blue-700" x-text="stock.alert_type || '-'"></span>
-                                                <span class="px-1 py-0.5 rounded bg-amber-50 text-amber-700" x-text="`BOX ${formatBoxPrice(stock.box_upper_price)}`"></span>
-                                            </div>
-                                        </div>
-                                    </template>
-                                    <template x-if="alphaForgePicks().length === 0">
-                                        <div class="dual-horizon-empty">후보 대기</div>
-                                    </template>
-                                </div>
-                            </div>
-
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                                 <h3 class="dual-horizon-title">Live Momentum Picks</h3>
                                 <div class="space-y-1">
@@ -322,7 +297,7 @@
                                             </div>
                                             <div class="mt-1 flex justify-between text-[9px] mono font-bold">
                                                 <span :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0 }" x-text="`${(stock.change_pct || 0).toFixed(2)}%`"></span>
-                                                <span x-text="`강도 ${(stock.strength || 0).toFixed(0)}`"></span>
+                                                <span x-text="`강도 ${formatStrength(stock.strength)}`"></span>
                                                 <span x-text="stock.cumulative_trading_value ? `${(stock.cumulative_trading_value / 100000000).toFixed(0)}억` : '-'"></span>
                                             </div>
                                         </div>
@@ -346,7 +321,7 @@
                                                 <span class="dual-horizon-label overlap" x-text="stock.horizon_label"></span>
                                             </div>
                                             <div class="mt-1 text-[9px] text-gray-500 truncate"
-                                                 x-text="`등락 ${(stock.change_pct || 0).toFixed(2)}% · 강도 ${(stock.strength || 0).toFixed(0)}`"></div>
+                                                 x-text="`등락 ${fmtPct(stock.change_pct)} · 강도 ${formatStrength(stock.strength)}`"></div>
                                         </div>
                                     </template>
                                     <template x-if="overlapPicks().length === 0">

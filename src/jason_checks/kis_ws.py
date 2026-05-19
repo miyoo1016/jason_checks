@@ -119,7 +119,7 @@ def _parse_us_execution_tick(raw: str) -> Optional[ExecutionTick]:
             cumulative_trading_value=int(trading_value),
             high_price=price,
             low_price=price,
-            strength=100.0,
+            strength=0.0,
             change_pct=change_pct,
             timestamp=timestamp,
             market="US"

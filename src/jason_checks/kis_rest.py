@@ -119,7 +119,7 @@ async def fetch_top_movers(
                     "trading_value": int(item.get("acml_tr_pbmn", "0") or "0"),
                 })
             except: continue
-        
+
         logger.info("top_movers_fetched", count=len(results), market=market)
         return results
 
@@ -146,7 +146,7 @@ async def fetch_top_movers_cached(**kwargs) -> list[dict]:
 
 async def fetch_nxt_price(code: str) -> dict:
     """Fetch Nextrade (ATS) price for a single stock.
-    
+
     Uses: 주식현재가 시세 (FHKST01010100) with market code NX.
     """
     settings = get_settings()
@@ -219,7 +219,7 @@ def filter_non_theme_stocks(
 
 async def fetch_current_price(code: str) -> dict:
     """Fetch current price with NXT-aware logic.
-    
+
     During NXT hours (08:00-08:50, 15:30-20:00), query NXT market first.
     """
     from datetime import datetime as _dt
@@ -267,7 +267,7 @@ async def fetch_current_price(code: str) -> dict:
                     "volume": int(out.get("acml_vol", 0) or 0),
                     "trading_value": int(out.get("acml_tr_pbmn", 0) or 0),
                     # Strength is better fetched from FHKST01010300 (tday_rltv)
-                    "strength": float(out.get("tday_rltv", 100.0) or 100.0),
+                    "strength": float(out.get("tday_rltv", 0.0) or 0.0),
                     "foreigner_net_buy": int(out.get("frgn_ntby_qty", 0) or 0) * price,
                     "market": mrkt,
                 }
@@ -277,7 +277,7 @@ async def fetch_current_price(code: str) -> dict:
 
 async def fetch_overseas_price(ticker: str) -> dict:
     """Fetch overseas (US) current price via HHDFS00000300.
-    
+
     Tries NAS, then NYS if needed.
     """
     settings = get_settings()
@@ -294,7 +294,7 @@ async def fetch_overseas_price(ticker: str) -> dict:
         "tr_id": "HHDFS00000300",
         "custtype": "P",
     }
-    
+
     # Try NAS first, then NYS
     exchanges = ["NAS", "NYS", "AMS"]
     for ex in exchanges:
@@ -341,7 +341,7 @@ async def fetch_investor_data(code: str) -> dict:
         "custtype": "P",
     }
     params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code}
-    
+
     try:
         async with httpx.AsyncClient(verify=False) as client:
             resp = await client.get(url, headers=headers, params=params, timeout=5.0)
@@ -349,14 +349,14 @@ async def fetch_investor_data(code: str) -> dict:
                 data = resp.json()
                 output = data.get("output", [])
                 if not output: return {"foreign": 0, "institution": 0, "individual": 0}
-                
+
                 latest = output[0] if isinstance(output, list) else output
                 # Use standard field names for FHKST01010900
                 f_qty = int(latest.get("frgn_ntby_qty", 0) or 0)
                 o_qty = int(latest.get("orgn_ntby_qty", 0) or 0)
                 p_qty = int(latest.get("prsn_ntby_qty", 0) or 0)
                 prpr = int(latest.get("stck_prpr", 0) or 1)
-                
+
                 return {
                     "foreign": f_qty * prpr,
                     "institution": o_qty * prpr,
@@ -385,7 +385,7 @@ INDEX_CODES = {
 
 async def fetch_market_indices(market: str = "KR") -> dict:
     """Fetch index snapshot (KR or US).
-    
+
     KR: inquire-index-price (FHPUP02100000)
     US: inquire-index-price (FHPUP02100000) - same TR, different codes/market_div
     """
@@ -424,11 +424,11 @@ async def fetch_market_indices(market: str = "KR") -> dict:
                 resp = await client.get(url, headers=headers, params=params, timeout=5.0)
                 if resp.status_code != 200: continue
                 data = resp.json()
-                if data.get("rt_cd") != "0": 
+                if data.get("rt_cd") != "0":
                     logger.warning("index_api_error", code=code, msg=data.get("msg1", ""))
                     continue
                 out = data.get("output", {})
-                
+
                 if market == "KR":
                     price = float(out.get("bstp_nmix_prpr", 0) or 0)
                     chg_pct = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)
@@ -467,7 +467,7 @@ async def fetch_stock_investor_trend(code: str) -> dict:
     token = await get_access_token()
 
     # Step A: Get Strength from FHKST01010300
-    strength = 100.0
+    strength = 0.0
     try:
         url_exec = f"{rest_url}/uapi/domestic-stock/v1/quotations/inquire-investor" # Same endpoint often used for multiple TRs
         headers_exec = {
@@ -483,7 +483,7 @@ async def fetch_stock_investor_trend(code: str) -> dict:
                 data = resp.json()
                 out = data.get("output", [])
                 if out:
-                    strength = float(out[0].get("tday_rltv", 100.0) or 100.0)
+                    strength = float(out[0].get("tday_rltv", 0.0) or 0.0)
     except Exception: pass
 
     # Step B: Get Investor Trend from FHKST01010900
@@ -495,7 +495,7 @@ async def fetch_stock_investor_trend(code: str) -> dict:
         "tr_id": "FHKST01010900", "custtype": "P",
     }
     params_inv = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code}
-    
+
     try:
         async with httpx.AsyncClient(verify=False) as client:
             resp = await client.get(url_inv, headers=headers_inv, params=params_inv, timeout=3.0)
@@ -511,12 +511,12 @@ async def fetch_stock_investor_trend(code: str) -> dict:
             f_qty = int(latest.get("frgn_ntby_qty", 0) or 0)
             i_qty = int(latest.get("orgn_ntby_qty", 0) or 0)
             p_qty = int(latest.get("prsn_ntby_qty", 0) or 0)
-            
+
             # Use a price for valuation (heuristic)
             prpr = int(latest.get("stck_prpr", 0) or 0)
             if prpr == 0:
                 prpr = 1 # Fallback to qty only if price missing
-                
+
             return {
                 "foreigner": f_qty * prpr,
                 "institution": i_qty * prpr,
@@ -525,62 +525,20 @@ async def fetch_stock_investor_trend(code: str) -> dict:
             }
     except Exception as e:
         logger.warning("investor_trend_exception", code=code, error=str(e))
-        return {"foreigner": 0, "institution": 0, "individual": 0, "strength": 100.0}
+        return {"foreigner": 0, "institution": 0, "individual": 0, "strength": 0.0}
 
 
 async def fetch_index_investor_trend(index_code: str) -> dict:
-    """Fetch KOSPI/KOSDAQ aggregate investor trend (FHPTJ04400000)."""
-    settings = get_settings()
-    app_key, app_secret, _ = get_active_credentials()
-    rest_url, _ = get_urls(settings.kis_mode)
-    token = await get_access_token()
+    """Fetch KOSPI/KOSDAQ aggregate investor trend.
 
-    url = f"{rest_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
-    headers = {
-        "content-type": "application/json; charset=utf-8",
-        "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": app_secret,
-        "tr_id": "FHPTJ04400000", "custtype": "P",
-    }
-    # Use FHKST03010100 for higher integrity market index investor trend
-    params = {
-        "fid_cond_mrkt_div_code": "V",
-        "fid_cond_scr_div_code": "20301",
-        "fid_input_iscd": "0000" if index_code == "0001" else "1001",
-    }
-
-    try:
-        async with httpx.AsyncClient(verify=False) as client:
-            resp = await client.get(url, headers=headers, params=params, timeout=5.0)
-            if resp.status_code != 200:
-                return {"foreigner": 0, "institution": 0, "individual": 0}
-            data = resp.json()
-            if data.get("rt_cd") != "0":
-                logger.warning("index_inv_api_error", code=index_code, msg=data.get("msg1", "")[:60])
-                return {"foreigner": 0, "institution": 0, "individual": 0}
-
-        output = data.get("output", [])
-        if not output: return {"foreigner": 0, "institution": 0, "individual": 0}
-        
-        latest = output[0]
-        # Handle Market Investor Trend Output (FHKST03010100)
-        # Fields: prsn_ntby_tr_pbmn, frgn_ntby_tr_pbmn, orgn_ntby_tr_pbmn (in 100M KRW)
-        f_val = int(latest.get("frgn_ntby_tr_pbmn", 0) or 0) * 100000000 # Convert to KRW
-        o_val = int(latest.get("orgn_ntby_tr_pbmn", 0) or 0) * 100000000
-        p_val = int(latest.get("prsn_ntby_tr_pbmn", 0) or 0) * 100000000
-
-        logger.info("index_investor_fetched", code=index_code, foreigner=f_val, institution=o_val)
-        return {
-            "foreigner": f_val,
-            "institution": o_val,
-            "individual": p_val,
-        }
-    except Exception as e:
-        logger.warning("index_investor_exception", code=index_code, error=str(e))
-        return {"foreigner": 0, "institution": 0, "individual": 0}
+    Note: The public KIS open API does not support a stable index investor trend endpoint
+    without specialized/restricted access. To prevent EGW00201 rate limit consumption and
+    avoid flooding console logs with false alarms, we return zero flow gracefully.
+    """
+    return {"foreigner": 0, "institution": 0, "individual": 0}
 async def fetch_us_top_movers(limit: int = 15) -> list[dict]:
     """Fetch US market top movers (rank by volume).
-    
+
     Uses: 해외주식 실시간 순위 (HHDFS76410000)
     """
     settings = get_settings()
@@ -633,7 +591,7 @@ class KISClient:
             res['stck_prpr'] = res['price']
             res['w52_lw_pr'] = res['price'] * 0.8 # Mock for now if not available
         return res
-        
+
     async def fetch_stock_investor_trend(self, code: str) -> list[dict]:
         # Return a list of 1 for now to satisfy 3-day check in demo
         res = await fetch_stock_investor_trend(code)

@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import structlog
 import asyncio
+import os
 from datetime import datetime
 
 from jason_checks.web.ws_bridge import get_bridge, start_bridge
@@ -30,6 +31,8 @@ from jason_checks.kis_rest import (
     fetch_market_indices,
     fetch_stock_investor_trend,
     fetch_index_investor_trend,
+    fetch_current_price,
+    fetch_overseas_price,
     KISClient,
 )
 from jason_checks.scanners.value_scanner import ValueScanner
@@ -47,6 +50,159 @@ logger = structlog.get_logger()
 
 # Active market state
 CURRENT_MARKET = "KR"
+_PRICE_FETCH_LOCK = asyncio.Lock()
+
+
+def _normalize_symbol(code: object) -> str:
+    value = str(code or "").strip().upper()
+    if value.startswith("A") and value[1:].isdigit():
+        value = value[1:]
+    if value.isdigit() and len(value) < 6:
+        value = value.zfill(6)
+    return value
+
+
+def _theme_data_for_subscription(app: FastAPI) -> dict:
+    theme_data = dict(getattr(app, "theme_data", {}) or {})
+    alphaforge_theme = getattr(app, "alphaforge_theme_data", None)
+    if alphaforge_theme:
+        theme_data["AlphaForge"] = alphaforge_theme
+    return theme_data
+
+
+def _active_themes_for_subscription(app: FastAPI, active_themes: list[str]) -> list[str]:
+    if getattr(app, "alphaforge_theme_data", None) and "AlphaForge" not in active_themes:
+        return active_themes + ["AlphaForge"]
+    return active_themes
+
+
+def _build_watch_symbols(app: FastAPI) -> list[str]:
+    codes: list[str] = []
+    seen: set[str] = set()
+    for theme_data in (getattr(app, "theme_data", {}) or {}).values():
+        for stock in theme_data.get("stocks", []):
+            code = _normalize_symbol(stock.get("code", ""))
+            if code and code not in seen:
+                codes.append(code)
+                seen.add(code)
+    alphaforge_theme = getattr(app, "alphaforge_theme_data", {}) or {}
+    for stock in alphaforge_theme.get("stocks", []):
+        code = _normalize_symbol(stock.get("code", ""))
+        if code and code not in seen:
+            codes.append(code)
+            seen.add(code)
+    return codes
+
+
+def _watch_symbol_names(app: FastAPI) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for theme_data in (getattr(app, "theme_data", {}) or {}).values():
+        for stock in theme_data.get("stocks", []):
+            code = _normalize_symbol(stock.get("code", ""))
+            if code:
+                names.setdefault(code, str(stock.get("name", "")).strip())
+    alphaforge_theme = getattr(app, "alphaforge_theme_data", {}) or {}
+    for stock in alphaforge_theme.get("stocks", []):
+        code = _normalize_symbol(stock.get("code", ""))
+        if code:
+            names.setdefault(code, str(stock.get("name", "")).strip())
+    return names
+
+
+def _apply_price_snapshot(code: str, price_data: dict | None) -> bool:
+    code = _normalize_symbol(code)
+    if not price_data:
+        return False
+    price = float(price_data.get("price") or 0)
+    if price <= 0:
+        return False
+    update_data = {
+        "price": price,
+        "change_pct": float(price_data.get("change_pct") or 0),
+        "cumulative_volume": int(price_data.get("volume") or 0),
+        "cumulative_trading_value": int(price_data.get("trading_value") or 0),
+        "market": price_data.get("market", "J"),
+    }
+    strength_raw = price_data.get("strength")
+    strength = float(strength_raw or 0)
+    if strength > 0:
+        update_data["execution_strength"] = strength
+    app_state.update_stock(code, **update_data)
+    return True
+
+
+async def _fetch_price_snapshot(code: str) -> dict | None:
+    async with _PRICE_FETCH_LOCK:
+        if CURRENT_MARKET == "KR":
+            data = await fetch_current_price(code)
+        else:
+            data = await fetch_overseas_price(code)
+        await asyncio.sleep(0.25)
+        return data
+
+
+async def _theme_quote_polling_loop(app):
+    """Slowly hydrate the full dashboard universe via REST without expanding WS."""
+    await asyncio.sleep(1)
+    while True:
+        try:
+            symbols = list(getattr(app, "watch_symbols", []) or [])
+            if not symbols:
+                await asyncio.sleep(5)
+                continue
+
+            hydrated = 0
+            missing_codes: list[str] = []
+            symbol_names = _watch_symbol_names(app)
+            started_at = datetime.now()
+            estimated_sec = max(30, min(90, round(len(symbols) * 0.7)))
+            app.quote_polling_status = {
+                "total": len(symbols),
+                "success": 0,
+                "missing": 0,
+                "in_progress": True,
+                "started_at": started_at.isoformat(),
+                "updated_at": started_at.isoformat(),
+                "completed_at": "",
+                "duration_sec": getattr(app, "last_quote_polling_duration_sec", 0),
+                "estimated_sec": estimated_sec,
+                "missing_symbols": [],
+            }
+            logger.info("theme_quote_polling_start", count=len(symbols), market=CURRENT_MARKET)
+            for code in symbols:
+                data = await _fetch_price_snapshot(code)
+                if _apply_price_snapshot(code, data):
+                    hydrated += 1
+                else:
+                    missing_codes.append(code)
+                app.quote_polling_status.update({
+                    "success": hydrated,
+                    "missing": len(missing_codes),
+                    "updated_at": datetime.now().isoformat(),
+                })
+            missing_preview = [
+                {"code": code, "name": symbol_names.get(code, "")}
+                for code in missing_codes[:20]
+            ]
+            duration_sec = round((datetime.now() - started_at).total_seconds(), 1)
+            app.last_quote_polling_duration_sec = duration_sec
+            app.quote_polling_status.update({
+                "in_progress": False,
+                "completed_at": datetime.now().isoformat(),
+                "duration_sec": duration_sec,
+                "estimated_sec": duration_sec,
+                "missing_symbols": missing_preview,
+            })
+            logger.info(
+                "theme_quote_polling_done",
+                watch_symbols=len(symbols),
+                quote_success=hydrated,
+                price_missing=len(missing_codes),
+                missing_symbols=missing_preview,
+            )
+        except Exception as e:
+            logger.warning("theme_quote_polling_error", error=str(e))
+        await asyncio.sleep(60)
 
 
 async def _unified_polling_loop(app):
@@ -77,25 +233,27 @@ async def _unified_polling_loop(app):
             
             # 2. Update Stock Investor Trends
             active_themes = rank_themes(app.theme_data, top_n=4, pinned=[])
-            active_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=40)
+            sub_theme_data = _theme_data_for_subscription(app)
+            sub_active_themes = _active_themes_for_subscription(app, active_themes)
+            active_codes = get_expanded_subscription_codes(sub_theme_data, sub_active_themes, max_codes=40)
+            get_bridge().target_codes = list(active_codes)
             asyncio.create_task(get_ws().resubscribe(active_codes))
             
             if CURRENT_MARKET == "KR":
                 codes_set = set()
-                for tc in active_themes:
-                    for s in app.theme_data.get(tc, {}).get("stocks", [])[:4]:
-                        codes_set.add(s["code"])
+                for tc in sub_active_themes:
+                    for s in sub_theme_data.get(tc, {}).get("stocks", []):
+                        codes_set.add(_normalize_symbol(s["code"]))
                 for s in getattr(app, "surge_data", []):
-                    if s.get("code"): codes_set.add(s["code"])
+                    if s.get("code"): codes_set.add(_normalize_symbol(s["code"]))
                 
                 unique_codes = list(codes_set)[:30]
                 logger.info("polling_stocks_start", count=len(unique_codes))
                 
-                from jason_checks.kis_rest import fetch_current_price
                 for code in unique_codes:
                     try:
                         tr = await fetch_stock_investor_trend(code)
-                        pr = await fetch_current_price(code)
+                        pr = await _fetch_price_snapshot(code)
                         stock = app_state.stocks.get(code)
                         
                         update_data = {}
@@ -108,8 +266,8 @@ async def _unified_polling_loop(app):
                             update_data["investor_individual"] = tr["individual"]
                             
                         str_val = tr.get("strength", (pr.get("strength", 0) if pr else 0))
-                        if str_val != 0 or not stock or stock.execution_strength == 0:
-                            update_data["execution_strength"] = str_val if str_val != 0 else 100.0
+                        if str_val not in (None, "", 0, 0.0):
+                            update_data["execution_strength"] = float(str_val)
                         if pr:
                             update_data.update({
                                 "price": pr["price"], "change_pct": pr["change_pct"],
@@ -123,16 +281,15 @@ async def _unified_polling_loop(app):
                         await asyncio.sleep(1.5)
             else:
                 # US Market
-                from jason_checks.kis_rest import fetch_overseas_price
                 codes = []
-                for tc in active_themes:
-                    for s in app.theme_data.get(tc, {}).get("stocks", [])[:4]:
+                for tc in sub_active_themes:
+                    for s in sub_theme_data.get(tc, {}).get("stocks", [])[:4]:
                         codes.append(s["code"])
                 for code in codes[:24]:
                     try:
-                        pr = await fetch_overseas_price(code)
+                        pr = await _fetch_price_snapshot(code)
                         if pr:
-                            app_state.update_stock(code, price=pr["price"], change_pct=pr["change_pct"], cum_volume_krw=pr["trading_value"])
+                            _apply_price_snapshot(code, pr)
                     except: pass
                     await asyncio.sleep(0.5)
             
@@ -165,6 +322,7 @@ def create_app() -> FastAPI:
     def reload_market_themes(market: str):
         global CURRENT_MARKET
         CURRENT_MARKET = market
+        yaml_path = None
         try:
             filename = "themes.yaml" if market == "KR" else "themes_us.yaml"
             # Path(__file__).parent is web/, .parent.parent is jason_checks/, .parent.parent.parent is src/, .parent.parent.parent.parent is root
@@ -173,27 +331,56 @@ def create_app() -> FastAPI:
             with open(yaml_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
             app.theme_data = data.get("themes", {})
+            app.theme_load_status = "ok"
+            app.theme_load_reason = ""
             app.alphaforge_candidates_loaded = 0
             app.alphaforge_candidates_path = ""
             app.alphaforge_candidates_generated_at = ""
+            app.alphaforge_theme_data = {}
             if market == "KR":
                 alphaforge_candidates, alphaforge_meta = load_alphaforge_candidates_with_meta()
                 app.alphaforge_candidates_path = alphaforge_meta.get("path", "")
                 app.alphaforge_candidates_generated_at = alphaforge_meta.get("generated_at", "")
                 if alphaforge_candidates:
-                    app.theme_data = build_alphaforge_theme(alphaforge_candidates)
+                    app.alphaforge_theme_data = build_alphaforge_theme(alphaforge_candidates).get("AlphaForge", {})
                     app.alphaforge_candidates_loaded = len(alphaforge_candidates)
-            app.stock_codes = get_all_stock_codes(app.theme_data)
+            app.stock_codes = get_all_stock_codes(_theme_data_for_subscription(app))
+            app.theme_symbols = get_all_stock_codes(app.theme_data)
+            app.watch_symbols = _build_watch_symbols(app)
+            app.last_quote_polling_duration_sec = 0
+            app.quote_polling_status = {
+                "total": len(app.watch_symbols),
+                "success": 0,
+                "missing": 0,
+                "in_progress": False,
+                "started_at": "",
+                "updated_at": "",
+                "completed_at": "",
+                "duration_sec": 0,
+                "estimated_sec": max(30, min(90, round(len(app.watch_symbols) * 0.7))),
+                "missing_symbols": [],
+            }
             app.code_theme_map = build_code_to_theme_map(app.theme_data)
             logger.info(
                 "market_switched",
                 market=market,
                 themes=len(app.theme_data),
+                theme_symbols=len(app.theme_symbols),
+                watch_symbols=len(app.watch_symbols),
                 alphaforge_candidates=app.alphaforge_candidates_loaded,
                 alphaforge_path=app.alphaforge_candidates_path,
             )
         except Exception as e:
-            logger.error("market_switch_failed", error=str(e), path=str(yaml_path))
+            if not getattr(app, "theme_data", None):
+                app.theme_data = {}
+                app.stock_codes = []
+                app.theme_symbols = []
+                app.watch_symbols = []
+                app.code_theme_map = {}
+            app.theme_load_status = "error"
+            app.theme_load_reason = str(e)
+            app.alphaforge_theme_data = getattr(app, "alphaforge_theme_data", {})
+            logger.warning("market_switch_failed_keep_existing_themes", error=str(e), path=str(yaml_path))
 
     # Initial load
     reload_market_themes("KR")
@@ -206,9 +393,12 @@ def create_app() -> FastAPI:
             return
             
         initial_themes = list(app.theme_data.keys())[:4]
-        codes_to_sub = get_expanded_subscription_codes(app.theme_data, initial_themes, max_codes=40)
+        sub_theme_data = _theme_data_for_subscription(app)
+        sub_initial_themes = _active_themes_for_subscription(app, initial_themes)
+        codes_to_sub = get_expanded_subscription_codes(sub_theme_data, sub_initial_themes, max_codes=40)
         await start_bridge(codes_to_sub)
         asyncio.create_task(_unified_polling_loop(app))
+        asyncio.create_task(_theme_quote_polling_loop(app))
         asyncio.create_task(_signal_journal_loop(app))
 
     @app.on_event("shutdown")
@@ -232,7 +422,9 @@ def create_app() -> FastAPI:
         
         # Immediate resubscribe
         active_themes = list(app.theme_data.keys())[:4]
-        new_codes = get_expanded_subscription_codes(app.theme_data, active_themes, max_codes=40)
+        sub_theme_data = _theme_data_for_subscription(app)
+        sub_active_themes = _active_themes_for_subscription(app, active_themes)
+        new_codes = get_expanded_subscription_codes(sub_theme_data, sub_active_themes, max_codes=40)
         
         # Clear old data to avoid confusion
         app_state.stocks.clear()
@@ -266,14 +458,39 @@ def create_app() -> FastAPI:
         return save_signal_journal(getattr(app, "theme_data", {}), market=CURRENT_MARKET)
 
     @app.get("/api/themes")
-    async def get_themes(sort: str = "strength", pinned: str = ""):
-        if not app.theme_data: return {"themes": {}}
+    async def get_themes(sort: str = "default", pinned: str = ""):
+        quote_status = getattr(app, "quote_polling_status", {})
+        supply_reason = ""
+        if not os.getenv("KRX_ID") or not os.getenv("KRX_PW"):
+            supply_reason = "KRX 로그인 정보 없음"
+        if not app.theme_data:
+            return {
+                "themes": {},
+                "market": CURRENT_MARKET,
+                "ws_connected": app_state.ws_connected,
+                "mode": get_settings().kis_mode,
+                "theme_load_status": getattr(app, "theme_load_status", "empty"),
+                "theme_load_reason": getattr(app, "theme_load_reason", "산업군 데이터 없음"),
+                "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
+                "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
+                "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
+                "alphaforge_picks": [],
+                "quote_polling": quote_status,
+                "supply_data_reason": supply_reason,
+            }
         pinned_list = [p for p in pinned.split(",") if p.strip()]
-        active_themes = rank_themes(app.theme_data, top_n=4, pinned=pinned_list)
+        if sort == "default":
+            active_themes = list(app.theme_data.keys())
+            active_themes = [p for p in pinned_list if p in active_themes] + [
+                t for t in active_themes if t not in pinned_list
+            ]
+        else:
+            active_themes = rank_themes(app.theme_data, top_n=len(app.theme_data), pinned=pinned_list)
         
         stock_ticks = {}
         for code, stock in app_state.stocks.items():
-            stock_ticks[code] = {
+            norm_code = _normalize_symbol(code)
+            stock_ticks[norm_code] = {
                 "price": stock.price,
                 "change_pct": stock.change_pct,
                 "cumulative_volume": stock.cumulative_volume,
@@ -287,6 +504,7 @@ def create_app() -> FastAPI:
                 "individual_flow": stock.individual_flow,
                 "supply_status": stock.supply_status,
                 "supply_updated_at": stock.supply_updated_at,
+                "updated_at": stock.last_tick_ts.isoformat(),
             }
 
         themes_result = {}
@@ -298,8 +516,9 @@ def create_app() -> FastAPI:
 
             leader_list = []
             for leader in leaders:
+                code_norm = _normalize_symbol(leader["code"])
                 ld = {
-                    "code": leader["code"],
+                    "code": code_norm,
                     "name": leader["name"],
                     "score": leader["score"],
                     "tier": leader.get("tier", ""),
@@ -318,7 +537,8 @@ def create_app() -> FastAPI:
                     "supply_status": "DATA_NA",
                     "supply_updated_at": "",
                 }
-                if leader["code"] in stock_ticks: ld.update(stock_ticks[leader["code"]])
+                if code_norm in stock_ticks:
+                    ld.update(stock_ticks[code_norm])
                 leader_list.append(ld)
 
             themes_result[theme_code] = {
@@ -328,14 +548,112 @@ def create_app() -> FastAPI:
                 "leaders": leader_list,
             }
 
+        alphaforge_picks = []
+        alphaforge_theme = getattr(app, "alphaforge_theme_data", {}) or {}
+        if alphaforge_theme:
+            alpha_data = {"AlphaForge": alphaforge_theme}
+            alpha_leaders = select_leaders("AlphaForge", stock_ticks, alpha_data, sort_mode=sort)
+            for leader in alpha_leaders:
+                code_norm = _normalize_symbol(leader["code"])
+                ld = {
+                    "code": code_norm,
+                    "name": leader["name"],
+                    "score": leader["score"],
+                    "tier": leader.get("tier", ""),
+                    "alert_type": leader.get("alert_type", ""),
+                    "rs": leader.get("rs", ""),
+                    "vcp_status": leader.get("vcp_status", ""),
+                    "box_upper_price": leader.get("box_upper_price", ""),
+                    "short_swing_score": leader.get("short_swing_score", "-"),
+                    "position_swing_score": leader.get("position_swing_score", "-"),
+                    "horizon_label": leader.get("horizon_label", "-"),
+                    "short_reasons": leader.get("short_reasons", "-"),
+                    "position_reasons": leader.get("position_reasons", "-"),
+                    "foreign_flow": None,
+                    "institution_flow": None,
+                    "individual_flow": None,
+                    "supply_status": "DATA_NA",
+                    "supply_updated_at": "",
+                }
+                if code_norm in stock_ticks:
+                    ld.update(stock_ticks[code_norm])
+                alphaforge_picks.append(ld)
+
+        theme_rows = [
+            stock
+            for theme in themes_result.values()
+            for stock in theme.get("leaders", [])
+        ]
+        theme_row_total = len(theme_rows)
+        theme_row_price_count = sum(1 for stock in theme_rows if float(stock.get("price") or 0) > 0)
+        watch_symbols = [_normalize_symbol(code) for code in (getattr(app, "watch_symbols", []) or [])]
+        app_state_price_count = sum(
+            1
+            for code in set(watch_symbols)
+            if float(getattr(app_state.stocks.get(code), "price", 0) or 0) > 0
+        )
+        app_state_price_codes = {
+            _normalize_symbol(code)
+            for code, stock in app_state.stocks.items()
+            if float(getattr(stock, "price", 0) or 0) > 0
+        }
+        missing_quote_rows = [
+            {"code": stock.get("code"), "name": stock.get("name")}
+            for stock in theme_rows
+            if float(stock.get("price") or 0) <= 0
+        ][:20]
+        ui_merge_failed = [
+            {"code": stock.get("code"), "name": stock.get("name")}
+            for stock in theme_rows
+            if stock.get("code") in app_state_price_codes and float(stock.get("price") or 0) <= 0
+        ][:20]
+        symbol_mismatch = [
+            {"raw": code, "normalized": _normalize_symbol(code)}
+            for code in app_state.stocks.keys()
+            if code != _normalize_symbol(code)
+        ][:20]
+        display_quote_status = dict(quote_status or {})
+        display_quote_status.update({
+            "total": theme_row_total,
+            "success": theme_row_price_count,
+            "missing": max(theme_row_total - theme_row_price_count, 0),
+            "watch_symbols": len(watch_symbols),
+            "app_state_price_count": app_state_price_count,
+            "theme_row_total": theme_row_total,
+            "theme_row_price_count": theme_row_price_count,
+            "symbol_mismatch_count": len(symbol_mismatch),
+            "symbol_mismatch": symbol_mismatch,
+            "missing_symbols": missing_quote_rows,
+            "ui_merge_failed": ui_merge_failed,
+        })
+        now_ts = datetime.now().timestamp()
+        last_diag_ts = getattr(app, "_last_theme_quote_diag_ts", 0)
+        if now_ts - last_diag_ts > 15:
+            app._last_theme_quote_diag_ts = now_ts
+            logger.info(
+                "theme_quote_display_diag",
+                watch_symbols=len(watch_symbols),
+                app_state_price_count=app_state_price_count,
+                theme_row_total=theme_row_total,
+                theme_row_price_count=theme_row_price_count,
+                symbol_mismatch_count=len(symbol_mismatch),
+                missing_quote_rows=missing_quote_rows,
+                ui_merge_failed=ui_merge_failed,
+            )
+
         return {
             "themes": themes_result,
             "market": CURRENT_MARKET,
             "ws_connected": app_state.ws_connected,
             "mode": get_settings().kis_mode,
+            "theme_load_status": getattr(app, "theme_load_status", "ok"),
+            "theme_load_reason": getattr(app, "theme_load_reason", ""),
             "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
             "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
             "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
+            "alphaforge_picks": alphaforge_picks,
+            "quote_polling": display_quote_status,
+            "supply_data_reason": supply_reason,
         }
 
     @app.get("/api/indices")

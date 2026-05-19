@@ -25,9 +25,11 @@ class WSBridge:
         self.kis_ws = get_ws()
         self.stream_task: asyncio.Task = None
         self.running = False
+        self.target_codes: list[str] = []
 
     async def start_stream(self, codes: list[str]) -> None:
         """Start streaming from KIS."""
+        self.target_codes = list(codes)
         if self.running:
             return
 
@@ -42,9 +44,7 @@ class WSBridge:
         while self.running:
             try:
                 await self.kis_ws.connect()
-                current_codes = list(app_state.stocks.keys())
-                if not current_codes:
-                    current_codes = initial_codes
+                current_codes = self.target_codes or initial_codes
                 
                 # Proactively flush current target codes to clear zombie slots
                 if current_codes:
@@ -93,7 +93,7 @@ class WSBridge:
                                 volume=0,
                                 cumulative_volume=data["volume"],
                                 cumulative_trading_value=data.get("trading_value", 0),
-                                strength=data.get("strength", 100.0),
+                                strength=data.get("strength", 0.0),
                                 timestamp=datetime.now().strftime("%H%M%S"),
                                 market="J"
                             )
@@ -127,7 +127,7 @@ class WSBridge:
         
         # Retain previous non-zero strength if current tick has 0
         final_strength = tick.strength if tick.strength > 0 else stock.execution_strength
-        if final_strength == 0: final_strength = 100.0 # Default if everything is 0
+        if final_strength == 0: final_strength = 0.0 # Default if everything is 0
         
         app_state.update_stock(
             tick.code,

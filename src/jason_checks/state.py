@@ -66,6 +66,10 @@ class AppState:
 
     def get_or_create_stock(self, code: str) -> StockState:
         """Get or create stock state."""
+        if not code: return None
+        code = str(code).strip().upper()
+        if code.startswith("A") and code[1:].isdigit(): code = code[1:]
+        if code.isdigit() and len(code) < 6: code = code.zfill(6)
         if code not in self.stocks:
             self.stocks[code] = StockState(code=code)
         return self.stocks[code]

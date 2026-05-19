@@ -6,6 +6,15 @@ from typing import Dict, List, Optional
 from jason_checks.kis_ws import ExecutionTick
 
 
+def _normalize_symbol(code: str) -> str:
+    value = str(code or "").strip().upper()
+    if value.startswith("A") and value[1:].isdigit():
+        value = value[1:]
+    if value.isdigit() and len(value) < 6:
+        value = value.zfill(6)
+    return value
+
+
 def load_themes() -> Dict:
     """Load theme configuration from themes.yaml at project root."""
     yaml_path = Path(__file__).parent.parent.parent / "themes.yaml"
@@ -86,7 +95,8 @@ def select_leaders(
     # Score each stock in the pool
     scored = []
     for stock_info in stocks:
-        code = stock_info["code"]
+        raw_code = stock_info["code"]
+        code = _normalize_symbol(raw_code)
         tick = stock_ticks.get(code)
         score = compute_leader_score(tick, sort_mode=sort_mode)
 

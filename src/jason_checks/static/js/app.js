@@ -37,7 +37,11 @@ function timaApp() {
         currentTime: new Date().toLocaleTimeString('ko-KR'),
         ws: null,
         pinnedThemes: new Set(),
-        sortMode: 'strength',
+        sortMode: 'default',
+        themeStableOrder: [],
+        themeSortOrder: [],
+        quotePolling: {},
+        supplyDataReason: '',
         surges: [],
         surgeSortMode: 'change_pct',
         sessionType: 'closed',  // 'pre' | 'regular' | 'after' | 'closed'
@@ -47,6 +51,10 @@ function timaApp() {
         scanResults: { a: [], b: [], c: [] },
         alphaforgeCandidatesLoaded: 0,
         alphaforgeCandidatesGeneratedAt: '',
+        alphaforgePicksData: [],
+        themeLoadStatus: 'ok',
+        themeLoadReason: '',
+        chartHistory: { stocks: {}, indices: {} },
         copyStatus: 'idle',
         signalSaveStatus: 'idle',
         // US Portfolio Watch state (only fetched when market === 'US')
@@ -199,7 +207,9 @@ function timaApp() {
         // Integer strength (toFixed(0))
         fmtStr(v) {
             if (!this._isVal(v)) return '-';
-            return Number(v).toFixed(0);
+            const n = Number(v);
+            if (n <= 0) return '-';
+            return n.toFixed(0);
         },
         // Float strength (toFixed(1)) for theme-level display
         fmtStr1(v) {
@@ -251,7 +261,12 @@ function timaApp() {
             try {
                 const res = await fetch('/api/indices');
                 const data = await res.json();
-                if (data.indices) this.indices = data.indices;
+                if (data.indices) {
+                    this.indices = data.indices;
+                    for (const [code, index] of Object.entries(this.indices || {})) {
+                        this.recordChartPoint('indices', code, index?.price, index?.change_pct);
+                    }
+                }
             } catch (e) {
                 console.error('Failed to load indices:', e);
             }
@@ -270,6 +285,49 @@ function timaApp() {
             } else {
                 return `${sign}${abs.toLocaleString()}`;
             }
+        },
+
+        formatTradingValue(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) return '-';
+            if (n >= 1000000000000) return `${(n / 1000000000000).toFixed(1)}조`;
+            if (n >= 100000000) return `${Math.round(n / 100000000)}억`;
+            if (n >= 10000) return `${Math.round(n / 10000).toLocaleString('ko-KR')}만`;
+            return n.toLocaleString('ko-KR');
+        },
+
+        formatStrength(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) return '-';
+            return n.toFixed(0);
+        },
+
+        supplyBadge(stock) {
+            const status = stock?.supply_status || 'DATA_NA';
+            return status === 'OK' ? '수급 OK' : `수급 ${status}`;
+        },
+
+        formatClock(value) {
+            if (!value) return '-';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return '-';
+            return date.toLocaleTimeString('ko-KR', { hour12: false });
+        },
+
+        quoteLoadText() {
+            const q = this.quotePolling || {};
+            const total = Number(q.total) || 0;
+            const success = Number(q.success) || 0;
+            const missing = Number(q.missing) || 0;
+            if (!total) return '시세 로드: 대기';
+            return `시세 로드: ${success}/${total} · 누락 ${missing}`;
+        },
+
+        quoteEtaText() {
+            const q = this.quotePolling || {};
+            const seconds = Number(q.duration_sec) || Number(q.estimated_sec) || 0;
+            const label = q.in_progress ? '전체 스캔 예상' : '전체 스캔';
+            return seconds > 0 ? `${label}: 약 ${Math.round(seconds)}초` : `${label}: 약 30~90초`;
         },
 
         formatSupplyFlow(stock, key) {
@@ -315,8 +373,8 @@ function timaApp() {
             const midY = (H / 2 + 0.5).toFixed(1);
             const placeholder = (label, cls) => `\
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
+<title>${label}</title>\
 <line x1="0" y1="${midY}" x2="${W}" y2="${midY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3"/>\
-<text x="${(W/2).toFixed(0)}" y="${(H/2+4).toFixed(0)}" text-anchor="middle" font-size="9" fill="${cls}" font-family="ui-sans-serif,system-ui">${label}</text>\
 </svg>`;
 
             if (!chart || status === 'DATA_NA') return placeholder('DATA_NA', '#94a3b8');
@@ -368,7 +426,7 @@ function timaApp() {
                 }
             }
             const baselineSvg = baselineLineY !== undefined
-                ? `<line x1="0" y1="${baselineLineY}" x2="${W}" y2="${baselineLineY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3"/>`
+                ? `<line x1="0" y1="${baselineLineY}" x2="${W}" y2="${baselineLineY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3" opacity="0.75"/>`
                 : '';
 
             // ── colour: green if last >= baseline (or first point) ─────────
@@ -386,7 +444,8 @@ function timaApp() {
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
 ${baselineSvg}\
 <path d="${areaPath}" fill="${fill}" stroke="none"/>\
-<path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>\
+<path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>\
+<circle cx="${xOf(ys.length - 1)}" cy="${yOf(last)}" r="2" fill="${stroke}"/>\
 </svg>`;
         },
 
@@ -397,6 +456,141 @@ ${baselineSvg}\
             const pct = Number(chart.change_from_baseline_pct);
             const pctStr = Number.isFinite(pct) ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '-';
             return `${chart.point_count}pts · ${pctStr}`;
+        },
+
+        _priceBaseline(price, changePct) {
+            const p = Number(price);
+            const c = Number(changePct);
+            if (!Number.isFinite(p) || p <= 0) return null;
+            if (!Number.isFinite(c) || c <= -99.9) return p;
+            return p / (1 + c / 100);
+        },
+
+        recordChartPoint(bucket, key, price, changePct) {
+            const p = Number(price);
+            if (!key || !Number.isFinite(p) || p <= 0) return;
+
+            const store = this.chartHistory[bucket] || (this.chartHistory[bucket] = {});
+            const now = Date.now();
+            const baseline = this._priceBaseline(p, changePct);
+            const chart = store[key] || {
+                baseline: baseline || p,
+                points: [],
+            };
+            if (baseline && (!Number.isFinite(Number(chart.baseline)) || chart.baseline <= 0)) {
+                chart.baseline = baseline;
+            }
+
+            const last = chart.points[chart.points.length - 1];
+            if (!last || Math.abs(Number(last.p) - p) > 0.0001 || now - Number(last.t || 0) > 30000) {
+                chart.points.push({ t: now, p });
+            }
+            chart.points = chart.points.slice(-48);
+            store[key] = chart;
+        },
+
+        chartFromHistory(bucket, key) {
+            const chart = this.chartHistory?.[bucket]?.[key];
+            if (!chart || !Array.isArray(chart.points) || chart.points.length < 2) {
+                return null;
+            }
+            const first = Number(chart.points[0]?.p);
+            const last = Number(chart.points[chart.points.length - 1]?.p);
+            const baseline = Number(chart.baseline);
+            const ref = Number.isFinite(baseline) && baseline > 0 ? baseline : first;
+            return {
+                status: 'OK',
+                baseline: ref,
+                points: chart.points,
+                point_count: chart.points.length,
+                change_from_baseline_pct: ref ? ((last - ref) / ref) * 100 : 0,
+            };
+        },
+
+        chartFromQuote(price, changePct) {
+            const p = Number(price);
+            if (!Number.isFinite(p) || p <= 0) return null;
+            const baseline = this._priceBaseline(p, changePct) || p;
+            const now = Date.now();
+            return {
+                status: 'OK',
+                baseline,
+                points: [
+                    { t: now - 60000, p: baseline },
+                    { t: now, p },
+                ],
+                point_count: 2,
+                change_from_baseline_pct: baseline ? ((p - baseline) / baseline) * 100 : 0,
+            };
+        },
+
+        stockChart(stock) {
+            if (!stock) return null;
+            const chart = stock.chart || stock.price_chart || stock.sparkline;
+            if (chart) return chart;
+            return this.chartFromHistory('stocks', stock.code)
+                || this.chartFromQuote(stock.price, stock.change_pct);
+        },
+
+        indexChart(index, code) {
+            if (!index) return null;
+            const chart = index.chart || index.price_chart || index.sparkline;
+            if (chart) return chart;
+            return this.chartFromHistory('indices', code)
+                || this.chartFromQuote(index.price, index.change_pct);
+        },
+
+        isLiveStock(stock) {
+            return this._isVal(stock?.price) && Number(stock.price) > 0;
+        },
+
+        compactLeaders(themeData) {
+            return [...(themeData?.leaders || [])]
+                .sort((a, b) => {
+                    const liveA = this.isLiveStock(a) ? 1 : 0;
+                    const liveB = this.isLiveStock(b) ? 1 : 0;
+                    if (liveA !== liveB) return liveB - liveA;
+                    return (Number(b.score) || 0) - (Number(a.score) || 0);
+                })
+                .slice(0, 4);
+        },
+
+        sortedThemeEntries() {
+            const themes = this.themes || {};
+            const existing = new Set(Object.keys(themes));
+            const pinned = [...this.pinnedThemes].filter(key => existing.has(key));
+            const baseOrder = this.sortMode === 'default' ? this.themeStableOrder : this.themeSortOrder;
+            const ordered = [...pinned];
+
+            for (const key of baseOrder) {
+                if (existing.has(key) && !ordered.includes(key)) ordered.push(key);
+            }
+            for (const key of Object.keys(themes)) {
+                if (!ordered.includes(key)) ordered.push(key);
+            }
+            return ordered.map(key => [key, themes[key]]).filter(([, value]) => !!value);
+        },
+
+        themeSortValue(theme, mode) {
+            if (!theme) return 0;
+            if (mode === 'change_pct') return Number(theme.avg_change_pct) || 0;
+            if (mode === 'trading_value') {
+                return (theme.leaders || []).reduce((sum, stock) => (
+                    sum + (Number(stock.cumulative_trading_value) || 0)
+                ), 0);
+            }
+            return Number(theme.strength) || 0;
+        },
+
+        rebuildThemeSortOrder(mode) {
+            const stableIndex = new Map(this.themeStableOrder.map((key, index) => [key, index]));
+            this.themeSortOrder = [...this.themeStableOrder]
+                .filter(key => this.themes?.[key])
+                .sort((a, b) => {
+                    const diff = this.themeSortValue(this.themes[b], mode) - this.themeSortValue(this.themes[a], mode);
+                    if (diff !== 0) return diff;
+                    return (stableIndex.get(a) || 0) - (stableIndex.get(b) || 0);
+                });
         },
 
         formatBoxPrice(value) {
@@ -580,6 +774,16 @@ ${baselineSvg}\
         },
 
         alphaForgePicks() {
+            if (Array.isArray(this.alphaforgePicksData) && this.alphaforgePicksData.length > 0) {
+                return this.alphaforgePicksData.map(stock => {
+                    const live = this.stocks[stock.code] || {};
+                    const merged = { ...stock, ...live };
+                    return {
+                        ...merged,
+                        horizon_setup_label: this.alphaForgeHorizonLabel(merged),
+                    };
+                });
+            }
             const picks = [];
             for (const [themeName, theme] of Object.entries(this.themes || {})) {
                 const isAlphaForge = themeName === 'AlphaForge' || theme?.display_name === 'AlphaForge';
@@ -667,10 +871,30 @@ ${baselineSvg}\
             for (const [code, index] of indexEntries) {
                 lines.push([
                     `${index.name || code} (${code})`,
+                    `현재가 ${this._isVal(index.price) ? Number(index.price).toLocaleString('ko-KR') : '-'}`,
+                    `등락률 ${this.fmtPct(index.change_pct)}`,
                     `외 ${this.formatIndexSupplyFlow(index, 'investor_foreigner')}`,
                     `기 ${this.formatIndexSupplyFlow(index, 'investor_institution')}`,
                     `개 ${this.formatIndexSupplyFlow(index, 'investor_individual')}`,
                 ].join(' / '));
+            }
+            lines.push('');
+            lines.push('[산업군/테마]');
+            const themeEntries = this.sortedThemeEntries();
+            if (themeEntries.length === 0) {
+                lines.push(`산업군 데이터 없음${this.themeLoadReason ? `: ${this.themeLoadReason}` : ''}`);
+            }
+            for (const [themeName, theme] of themeEntries) {
+                lines.push(`${theme.display_name || themeName} / 강도 ${this.fmtStr1(theme.strength)} / 등락 ${this.fmtPct(theme.avg_change_pct)}`);
+                for (const stock of this.compactLeaders(theme)) {
+                    lines.push([
+                        `- ${stock.name || stock.code} (${stock.code})`,
+                        `현재가 ${this._isVal(stock.price) ? Number(stock.price).toLocaleString('ko-KR') : '-'}`,
+                        `등락률 ${this.fmtPct(stock.change_pct)}`,
+                        `체결강도 ${this.fmtStr(stock.strength)}`,
+                        `거래대금 ${stock.cumulative_trading_value ? `${(Number(stock.cumulative_trading_value) / 100000000).toFixed(0)}억` : '-'}`,
+                    ].join(' / '));
+                }
             }
             lines.push('');
             lines.push('[AlphaForge Picks]');
@@ -684,7 +908,7 @@ ${baselineSvg}\
                 const event = this.intradayEvent(stock);
                 const price = stock.price ? Number(stock.price).toLocaleString('ko-KR') : '-';
                 const changePct = `${(Number(stock.change_pct) || 0).toFixed(2)}%`;
-                const strength = `${(Number(stock.strength) || 0).toFixed(0)}`;
+                const strength = this.formatStrength(stock.strength);
                 const tradingValue = stock.cumulative_trading_value
                     ? `${(Number(stock.cumulative_trading_value) / 100000000).toFixed(0)}억`
                     : '-';
@@ -723,7 +947,20 @@ ${baselineSvg}\
 
         async copyDashboardText() {
             try {
-                await navigator.clipboard.writeText(this.buildDashboardCopyText());
+                const text = this.buildDashboardCopyText();
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.setAttribute('readonly', '');
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                }
                 this.copyStatus = 'success';
             } catch (error) {
                 console.error('Failed to copy dashboard:', error);
@@ -809,9 +1046,9 @@ ${baselineSvg}\
 
         loadSortMode() {
             try {
-                this.sortMode = localStorage.getItem('tima_sort_mode') || 'strength';
+                this.sortMode = localStorage.getItem('tima_sort_mode') || 'default';
             } catch (e) {
-                this.sortMode = 'strength';
+                this.sortMode = 'default';
             }
         },
 
@@ -834,10 +1071,14 @@ ${baselineSvg}\
         },
 
         setSortMode(mode) {
-            this.sortMode = mode;
+            this.sortMode = this.sortMode === mode ? 'default' : mode;
+            if (this.sortMode === 'default') {
+                this.themeSortOrder = [];
+            } else {
+                this.rebuildThemeSortOrder(this.sortMode);
+            }
             this.saveSortMode();
-            this.loadThemes();
-            console.log(`🔄 Sort mode: ${mode}`);
+            console.log(`🔄 Sort mode: ${this.sortMode}`);
         },
 
         loadSurgeSortMode() {
@@ -924,17 +1165,41 @@ ${baselineSvg}\
         async loadThemes() {
             try {
                 const pinnedStr = [...this.pinnedThemes].join(',');
-                const response = await fetch(`/api/themes?sort=${this.sortMode}&pinned=${pinnedStr}`);
+                const response = await fetch(`/api/themes?sort=default&pinned=${pinnedStr}`);
                 const data = await response.json();
 
                 this.wsConnected = data.ws_connected || false;
                 this.mode = data.mode || 'paper';
                 this.alphaforgeCandidatesLoaded = data.alphaforge_candidates_loaded || 0;
                 this.alphaforgeCandidatesGeneratedAt = data.alphaforge_candidates_generated_at || '';
+                this.alphaforgePicksData = Array.isArray(data.alphaforge_picks) ? data.alphaforge_picks : [];
+                this.themeLoadStatus = data.theme_load_status || 'ok';
+                this.themeLoadReason = data.theme_load_reason || '';
+                this.quotePolling = data.quote_polling || {};
+                this.supplyDataReason = data.supply_data_reason || '';
 
-                // Themes returned in order from backend (pinned first, then top 4)
                 if (data.themes) {
                     this.themes = data.themes;
+                    const incomingOrder = Object.keys(data.themes);
+                    if (this.themeStableOrder.length === 0) {
+                        this.themeStableOrder = incomingOrder;
+                    } else {
+                        for (const key of incomingOrder) {
+                            if (!this.themeStableOrder.includes(key)) this.themeStableOrder.push(key);
+                        }
+                        this.themeStableOrder = this.themeStableOrder.filter(key => incomingOrder.includes(key));
+                    }
+                    if (this.sortMode !== 'default' && this.themeSortOrder.length === 0) {
+                        this.rebuildThemeSortOrder(this.sortMode);
+                    }
+                    for (const theme of Object.values(this.themes || {})) {
+                        for (const stock of theme.leaders || []) {
+                            this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
+                        }
+                    }
+                    for (const stock of this.alphaforgePicksData || []) {
+                        this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
+                    }
                 }
             } catch (error) {
                 console.error('Failed to load themes:', error);
@@ -997,6 +1262,7 @@ ${baselineSvg}\
                 };
 
                 console.log(`💹 ${code}: ${msg.price} (${msg.change_pct >= 0 ? '+' : ''}${msg.change_pct.toFixed(2)}%)`);
+                this.recordChartPoint('stocks', code, msg.price, msg.change_pct);
 
                 // Update themes with new tick data
                 this.updateThemesWithTick(code);
