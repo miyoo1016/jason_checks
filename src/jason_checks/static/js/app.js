@@ -68,6 +68,7 @@ function timaApp() {
         decisionCounts: { BUY_NOW: 0, STARTER_POSITION: 0, CONDITIONAL_BUY: 0, WATCH_ONLY: 0, AVOID: 0 },
         decisionSession: '',
         decisionMarketGate: {},
+        decisionSetupTop3: [],
 
         // Methods
         async init() {
@@ -867,6 +868,34 @@ ${baselineSvg}\
             return `${Number(pct) || 0}%`;
         },
 
+        deSetupScoreText(stock) {
+            const score = stock?.de_setup_score ?? stock?.decision_engine?.setup_score;
+            if (score === null || score === undefined || score === '') return '-';
+            return `${Number(score) || 0}점`;
+        },
+
+        deSetupLabelText(stock) {
+            return stock?.de_setup_label || stock?.decision_engine?.setup_label || '-';
+        },
+
+        deNextSessionTrigger(stock) {
+            return stock?.de_next_session_trigger || stock?.decision_engine?.next_session_trigger || '-';
+        },
+
+        deNextSessionPlan(stock) {
+            return stock?.de_next_session_plan || stock?.decision_engine?.next_session_plan || '-';
+        },
+
+        deSetupReason(stock) {
+            return stock?.de_setup_reason || stock?.decision_engine?.setup_reason || '-';
+        },
+
+        deSetupTop3Text() {
+            const rows = Array.isArray(this.decisionSetupTop3) ? this.decisionSetupTop3 : [];
+            if (rows.length === 0) return '내일 관찰 후보: -';
+            return `내일 관찰 후보: ${rows.map(row => `${row.name || row.symbol} ${row.setup_score || 0}점`).join(' / ')}`;
+        },
+
         liveMomentumPicks() {
             const alphaByCode = new Map(this.alphaForgePicks().map(s => [s.code, s]));
             const rows = Object.values(this.stocks || []).map(stock => {
@@ -929,6 +958,7 @@ ${baselineSvg}\
                     : 'MARKET_CLOSED';
                 lines.push(`오늘 매수추천 없음: ${reason}`);
             }
+            lines.push(this.deSetupTop3Text());
             lines.push('');
             lines.push('[Market Indices]');
             const indexEntries = Object.entries(this.indices || {});
@@ -980,6 +1010,11 @@ ${baselineSvg}\
                 const deTrigger = stock.de_entry_trigger || '-';
                 const deInvalidation = stock.de_invalidation || stock.de_invalidation_reason || '-';
                 const deMaxPct = this.deMaxPositionText(stock);
+                const setupScore = this.deSetupScoreText(stock);
+                const setupLabel = this.deSetupLabelText(stock);
+                const nextTrigger = this.deNextSessionTrigger(stock);
+                const nextPlan = this.deNextSessionPlan(stock);
+                const setupReason = this.deSetupReason(stock);
                 const deConfirmations = Array.isArray(stock.de_required_confirmations)
                     ? stock.de_required_confirmations.join(', ')
                     : (stock.de_required_confirmations || '-');
@@ -1010,8 +1045,13 @@ ${baselineSvg}\
                         `DECISION_ENGINE ${deDecision}`,
                         `confidence ${deConfidence}`,
                         `data_confidence ${deDataConfidence}`,
+                        `setup_score ${setupScore}`,
+                        `setup_label ${setupLabel}`,
+                        `setup_reason ${setupReason}`,
                         `no_buy_reason ${deReason}`,
                         `entry_trigger ${deTrigger}`,
+                        `next_session_trigger ${nextTrigger}`,
+                        `next_session_plan ${nextPlan}`,
                         `invalidation ${deInvalidation}`,
                         `max_position_pct ${deMaxPct}`,
                         `required_confirmations ${deConfirmations || '-'}`,
@@ -1290,6 +1330,7 @@ ${baselineSvg}\
                 if (data.decision_counts) this.decisionCounts = data.decision_counts;
                 if (data.decision_session) this.decisionSession = data.decision_session;
                 if (data.decision_market_gate) this.decisionMarketGate = data.decision_market_gate;
+                if (data.decision_setup_top3) this.decisionSetupTop3 = data.decision_setup_top3;
             } catch (error) {
                 console.error('Failed to load themes:', error);
             }

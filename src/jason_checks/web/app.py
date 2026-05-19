@@ -674,6 +674,11 @@ def create_app() -> FastAPI:
             pick["de_chase_risk"] = dec.get("chase_risk", False)
             pick["de_max_pct"] = dec.get("max_position_pct", 0)
             pick["de_stable"] = dec.get("stable", False)
+            pick["de_setup_score"] = dec.get("setup_score", 0)
+            pick["de_setup_label"] = dec.get("setup_label", "")
+            pick["de_next_session_trigger"] = dec.get("next_session_trigger", "")
+            pick["de_next_session_plan"] = dec.get("next_session_plan", "")
+            pick["de_setup_reason"] = dec.get("setup_reason", "")
 
         return {
             "themes": themes_result,
@@ -691,6 +696,7 @@ def create_app() -> FastAPI:
             "decision_counts": decision_summary["decision_counts"],
             "decision_session": session_now,
             "decision_market_gate": decision_summary["market_gate"],
+            "decision_setup_top3": decision_summary.get("setup_top3", []),
         }
 
     @app.get("/api/decision-summary")

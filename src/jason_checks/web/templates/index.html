@@ -186,6 +186,8 @@
                             <span class="ml-auto text-gray-400 normal-case font-medium"
                                   x-text="decisionSession === 'REGULAR' ? (decisionMarketGate?.reason || '') : '장 마감 — 내일 장중 확인'"></span>
                         </div>
+                        <div class="mt-1 text-[10px] font-bold text-blue-700 truncate"
+                             x-text="deSetupTop3Text()"></div>
                     </div>
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-2 mb-4">
@@ -245,13 +247,27 @@
                                             <div class="mt-0.5 text-[7px] text-red-500 font-bold truncate"
                                                  x-text="`이유: ${stock.de_no_buy_reason}`"></div>
                                         </template>
+                                        <div class="mt-0.5 flex flex-wrap gap-1 items-center leading-none">
+                                            <span class="text-[7px] mono font-black text-blue-700"
+                                                  x-text="`setup ${deSetupScoreText(stock)}`"></span>
+                                            <span class="px-1 py-0.5 rounded text-[7px] font-black bg-blue-50 text-blue-700"
+                                                  x-text="deSetupLabelText(stock)"></span>
+                                        </div>
+                                        <template x-if="stock.de_setup_reason">
+                                            <div class="mt-0.5 text-[7px] text-gray-500 font-bold truncate"
+                                                 x-text="`셋업: ${stock.de_setup_reason}`"></div>
+                                        </template>
                                         <template x-if="!stock.de_no_buy_reason && stock.de_action_reason">
                                             <div class="mt-0.5 text-[7px] text-gray-500 font-bold truncate"
                                                  x-text="`이유: ${stock.de_action_reason}`"></div>
                                         </template>
-                                        <template x-if="stock.de_entry_trigger">
+                                        <template x-if="stock.de_next_session_trigger || stock.de_entry_trigger">
                                             <div class="mt-0.5 text-[7px] text-amber-600 font-bold truncate"
-                                                 x-text="`트리거: ${stock.de_entry_trigger}`"></div>
+                                                 x-text="`내일 트리거: ${stock.de_next_session_trigger || stock.de_entry_trigger}`"></div>
+                                        </template>
+                                        <template x-if="stock.de_next_session_plan">
+                                            <div class="mt-0.5 text-[7px] text-gray-500 font-bold truncate"
+                                                 x-text="`계획: ${stock.de_next_session_plan}`"></div>
                                         </template>
                                         <template x-if="stock.de_invalidation">
                                             <div class="mt-0.5 text-[7px] text-gray-400 truncate"

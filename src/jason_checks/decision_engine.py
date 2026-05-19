@@ -98,6 +98,155 @@ def _chase_risk(change_pct: float, strength: float, box_price: float, price: flo
     return False
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def _setup_label(score: int, risk_only: bool) -> str:
+    if risk_only or score < 30:
+        return "RISK_ONLY"
+    if score >= 70:
+        return "STRONG_SETUP"
+    if score >= 50:
+        return "SETUP_WATCH"
+    return "WEAK_SETUP"
+
+
+def _setup_profile(
+    stock: dict[str, Any],
+    data_conf: str,
+    sector_gate: dict[str, Any],
+) -> dict[str, Any]:
+    """장마감 후 다음 세션 관찰 가치를 별도 점수로 평가."""
+    price = _to_float(stock.get("price"))
+    change_pct = _to_float(stock.get("change_pct"))
+    strength = _to_float(stock.get("strength"))
+    trading_value = int(_to_float(stock.get("cumulative_trading_value")))
+    supply_status = str(stock.get("supply_status") or "DATA_NA")
+    alert_type = str(stock.get("alert_type") or "")
+    vcp_status = str(stock.get("vcp_status") or "")
+    box_price = _to_float(stock.get("box_upper_price"))
+    rs = _to_float(stock.get("rs"))
+    reasons_text = " ".join(
+        str(stock.get(key) or "")
+        for key in ("short_reasons", "position_reasons", "horizon_label")
+    )
+
+    score = 35
+    reasons: list[str] = []
+    risk_only = False
+
+    if price > 0:
+        score += 8
+        reasons.append("현재가 확인")
+    else:
+        score -= 20
+        reasons.append("현재가 대기")
+
+    if rs >= 95:
+        score += 18
+        reasons.append(f"RS 상위 {rs:.0f}")
+    elif rs >= 85:
+        score += 14
+        reasons.append(f"RS 강함 {rs:.0f}")
+    elif rs >= 70:
+        score += 8
+        reasons.append(f"RS 양호 {rs:.0f}")
+
+    if trading_value >= 5_000_000_000:
+        score += 18
+        reasons.append("거래대금 강함")
+    elif trading_value >= 1_000_000_000:
+        score += 10
+        reasons.append("거래대금 확인")
+    elif trading_value > 0:
+        score += 3
+
+    if "정배열" in reasons_text:
+        score += 8
+        reasons.append("정배열")
+
+    if box_price > 0 and price > 0:
+        if price >= box_price:
+            score += 10
+            reasons.append("BOX 돌파권")
+        else:
+            gap_pct = ((box_price - price) / box_price) * 100
+            if gap_pct <= 5:
+                score += 8
+                reasons.append(f"BOX 근접 {gap_pct:.1f}%")
+            else:
+                score -= 4
+                reasons.append("BOX 아래")
+    elif box_price <= 0:
+        score -= 8
+        reasons.append("BOX 기준가 없음")
+
+    if strength >= 120:
+        score += 8
+        reasons.append("체결강도 강함")
+    elif 0 < strength < 90:
+        score -= 6
+        reasons.append("체결강도 약함")
+
+    if supply_status == "DATA_NA":
+        score -= 8
+        reasons.append("수급 DATA_NA")
+
+    if change_pct >= 7:
+        score -= 15
+        reasons.append("급등 추격 위험")
+    elif change_pct <= -5:
+        score -= 8
+        reasons.append("낙폭 큼")
+
+    if alert_type == "RISK_WATCH":
+        score -= 22
+        reasons.append("RISK_WATCH")
+    if vcp_status == "REVERSE_EXPANSION":
+        score -= 22
+        reasons.append("VCP 역수축")
+    if alert_type == "RISK_WATCH" and vcp_status == "REVERSE_EXPANSION":
+        score -= 18
+        risk_only = True
+        reasons.append("위험 신호 중첩")
+
+    if not sector_gate.get("confirmed", True):
+        score -= 6
+        reasons.append(f"섹터 약함: {sector_gate.get('reason', '-')}")
+
+    score = max(0, min(100, int(round(score))))
+    trigger = ""
+    if box_price > 0:
+        trigger = f"{box_price:,.0f} 돌파 + 거래대금 증가"
+        if strength <= 0 or strength < 110:
+            trigger += " + 체결강도 110 이상"
+    elif price > 0:
+        trigger = "장중 고점 돌파 + 거래대금 증가"
+
+    if risk_only:
+        plan = "위험 신호 해소 전까지 매수 금지"
+    elif box_price > 0 and price > 0 and price < box_price:
+        plan = "내일 장중 박스 돌파 확인 전까지 매수 금지"
+    elif score >= 70:
+        plan = "내일 장중 거래대금과 체결강도 확인 후 소량 검토"
+    else:
+        plan = "내일 장중 가격/거래대금 재확인"
+
+    return {
+        "setup_score": score,
+        "setup_label": _setup_label(score, risk_only),
+        "next_session_trigger": trigger,
+        "next_session_plan": plan,
+        "setup_reason": " · ".join(reasons[:6]) or "관찰 데이터 대기",
+    }
+
+
 def _signal_stable(symbol: str, decision: str) -> bool:
     """신호 안정화: 최근 3회 중 2회 같은 decision 이어야 확정."""
     hist = _signal_history.get(symbol)
@@ -136,6 +285,7 @@ def evaluate_stock(
 
     data_conf = _data_confidence(stock)
     chase = _chase_risk(change_pct, strength, box_price, price)
+    setup = _setup_profile(stock, data_conf, sector_gate)
 
     no_buy_reasons: list[str] = []
     entry_trigger_parts: list[str] = []
@@ -163,15 +313,18 @@ def evaluate_stock(
             "required_confirmations": [],
             "stable": False,
             "theme": theme_name,
+            **setup,
         }
 
     # ── Hard Gates ──────────────────────────────────────────────────────────
     if price <= 0:
         no_buy_reasons.append("현재가 없음")
         _record_signal(symbol, "AVOID")
-        return _make_result(symbol, name, "AVOID", 0, data_conf,
-                            "데이터 대기", "현재가 없음", "", "",
-                            False, 0, [], theme_name, False)
+        result = _make_result(symbol, name, "AVOID", 0, data_conf,
+                              "데이터 대기", "현재가 없음", "", "",
+                              False, 0, [], theme_name, False)
+        result.update(setup)
+        return result
 
     if alert_type == "RISK_WATCH":
         no_buy_reasons.append("RISK_WATCH 경보")
@@ -305,13 +458,15 @@ def evaluate_stock(
     stable = _signal_stable(symbol, decision)
     _record_signal(symbol, decision)
 
-    return _make_result(
+    result = _make_result(
         symbol, name, decision, confidence_score, data_conf,
         action_reason, "; ".join(no_buy_reasons) if no_buy_reasons else "",
         entry_trigger, invalidation,
         chase, max_position_pct, required_confirmations,
         theme_name, stable,
     )
+    result.update(setup)
+    return result
 
 
 def _make_result(symbol, name, decision, score, data_conf,
@@ -341,6 +496,11 @@ def _make_result(symbol, name, decision, score, data_conf,
         "required_confirmations": req_conf,
         "stable": stable,
         "theme": theme,
+        "setup_score": 0,
+        "setup_label": "RISK_ONLY",
+        "next_session_trigger": entry_trigger,
+        "next_session_plan": action_reason or "장중 조건 확인",
+        "setup_reason": action_reason or no_buy_reason or "관찰 데이터 대기",
     }
 
 
@@ -385,6 +545,15 @@ def run_decision_engine(
 
     top_actions = [r for r in results if r["decision"] in ("BUY_NOW", "STARTER_POSITION")]
     top_actions.sort(key=lambda x: x["confidence_score"], reverse=True)
+    setup_candidates = [
+        r for r in results
+        if r.get("setup_label") != "RISK_ONLY" and r.get("setup_score", 0) > 0
+    ]
+    setup_top3 = sorted(
+        setup_candidates,
+        key=lambda x: x.get("setup_score", 0),
+        reverse=True,
+    )[:3]
 
     no_buy_reasons = [
         {"symbol": r["symbol"], "name": r["name"], "reason": r["no_buy_reason"]}
@@ -405,6 +574,7 @@ def run_decision_engine(
         "decision_counts": decision_counts,
         "results": results,
         "top_actions": top_actions,
+        "setup_top3": setup_top3,
         "no_buy_reasons": no_buy_reasons,
         "data_confidence_summary": data_confidence_summary,
         "journal_write_status": journal_status,
