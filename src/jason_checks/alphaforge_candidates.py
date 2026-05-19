@@ -13,6 +13,20 @@ import structlog
 
 TARGET_ALERT_TYPE = "ACTION_ALERT"
 TARGET_TIER = "TIER_3"
+ALPHAFORGE_TRACKING_LABELS = {
+    "ACTION_ALERT",
+    "PRIORITY_WATCH",
+    "NEAR_BUY",
+    "BUY_CANDIDATE",
+}
+ALPHAFORGE_LABEL_FIELDS = (
+    "alert_type",
+    "watch_alert_type",
+    "legacy_label",
+    "final_label",
+    "display_label",
+    "display_watch_alert_type",
+)
 LOAD_TIERS = {"TIER_2", "TIER_3"}
 EXCLUDED_LOAD_STATUSES = {"REJECTED", "EXCLUDED", "DROP", "DROPPED"}
 EXPORT_PATH = Path("data") / "exports" / "alphaforge_candidates.json"
@@ -62,10 +76,18 @@ def _pick(item: dict[str, Any], *keys: str, default: Any = "") -> Any:
     return default
 
 
+def get_alphaforge_labels(candidate: dict[str, Any]) -> set[Any]:
+    return {candidate.get(key) for key in ALPHAFORGE_LABEL_FIELDS}
+
+
+def is_alphaforge_tracking_candidate(candidate: dict[str, Any]) -> bool:
+    labels = {str(label) for label in get_alphaforge_labels(candidate) if label}
+    return bool(labels & ALPHAFORGE_TRACKING_LABELS)
+
+
 def _is_export_candidate(item: dict[str, Any]) -> bool:
     return (
-        item.get("watch_alert_type") == TARGET_ALERT_TYPE
-        or item.get("alert_type") == TARGET_ALERT_TYPE
+        is_alphaforge_tracking_candidate(item)
         or item.get("primary_bucket") == TARGET_TIER
         or item.get("final_class") == TARGET_TIER
         or item.get("tier") == TARGET_TIER
@@ -106,7 +128,7 @@ def _skip_reason(item: Any) -> str:
     if not str(_pick(item, "symbol", "code", "ticker")).strip():
         return "missing_symbol"
     if not _is_export_candidate(item):
-        return "not_action_alert_or_tier3"
+        return "not_tracking_label_or_tier3"
     return ""
 
 
@@ -126,7 +148,7 @@ def export_alphaforge_candidates(
     path: Path | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
-    """Export ACTION_ALERT or TIER_3 AlphaForge candidates as JSON."""
+    """Export tracked AlphaForge labels or TIER_3 candidates as JSON."""
     export_path = path or get_export_path()
     export_path.parent.mkdir(parents=True, exist_ok=True)
     generated = generated_at or datetime.now(timezone.utc).isoformat()
@@ -147,6 +169,11 @@ def export_alphaforge_candidates(
                 "name": _pick(item, "name", "stock_name", default=symbol),
                 "tier": _pick(item, "tier", "primary_bucket", "final_class"),
                 "alert_type": _pick(item, "alert_type", "watch_alert_type"),
+                "watch_alert_type": _pick(item, "watch_alert_type", "alert_type"),
+                "legacy_label": _pick(item, "legacy_label", "alert_type", "watch_alert_type"),
+                "final_label": _pick(item, "final_label", "display_label", "display_watch_alert_type"),
+                "display_label": _pick(item, "display_label", "final_label", "display_watch_alert_type"),
+                "display_watch_alert_type": _pick(item, "display_watch_alert_type", "display_label", "final_label"),
                 "rs": _pick(item, "rs", "rs_percentile"),
                 "vcp_status": _pick(item, "vcp_status"),
                 "box_upper_price": _pick(item, "box_upper_price", "box_high", "pivot_price", default=None),
@@ -318,6 +345,11 @@ def _normalize_loaded_candidates(raw_candidates: list[Any]) -> tuple[list[dict[s
             "name": str(_pick(item, "name", "stock_name", default=symbol)),
             "tier": _pick(item, "tier", "primary_bucket", "final_class"),
             "alert_type": _pick(item, "alert_type", "watch_alert_type"),
+            "watch_alert_type": _pick(item, "watch_alert_type", "alert_type"),
+            "legacy_label": _pick(item, "legacy_label", "alert_type", "watch_alert_type"),
+            "final_label": _pick(item, "final_label", "display_label", "display_watch_alert_type"),
+            "display_label": _pick(item, "display_label", "final_label", "display_watch_alert_type"),
+            "display_watch_alert_type": _pick(item, "display_watch_alert_type", "display_label", "final_label"),
             "rs": item.get("rs", ""),
             "vcp_status": item.get("vcp_status", ""),
             "box_upper_price": item.get("box_upper_price", ""),

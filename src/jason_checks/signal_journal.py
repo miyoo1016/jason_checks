@@ -11,32 +11,42 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from jason_checks.state import app_state
+from jason_checks.event_layer import compute_event
+from jason_checks.alphaforge_candidates import is_alphaforge_tracking_candidate
 
 
 logger = structlog.get_logger()
 KST = ZoneInfo("Asia/Seoul")
+ET  = ZoneInfo("America/New_York")
 
 
 def get_session_status(now: datetime | None = None, market: str = "KR") -> str:
     now = now or datetime.now(KST)
-    if now.weekday() >= 5:
-        return "MARKET_CLOSED"
 
-    hhmm = now.hour * 100 + now.minute
-    if market == "KR":
-        if 800 <= hhmm < 850:
+    if market == "US":
+        # Convert to ET so weekday & time comparisons are correct across DST.
+        # KST-based weekday check is wrong: KST Sat 00:xx = ET Fri 11:xx (market open).
+        now_et = now.astimezone(ET)
+        if now_et.weekday() >= 5:          # Saturday / Sunday in ET
+            return "MARKET_CLOSED"
+        hhmm = now_et.hour * 100 + now_et.minute
+        if 400 <= hhmm < 930:
             return "PRE_MARKET"
-        if 900 <= hhmm <= 1530:
+        if 930 <= hhmm < 1600:
             return "REGULAR"
-        if 1530 < hhmm < 2000:
+        if 1600 <= hhmm < 2000:
             return "AFTER_MARKET"
         return "MARKET_CLOSED"
 
-    if 1700 <= hhmm < 2230:
+    # KR: use KST
+    if now.weekday() >= 5:
+        return "MARKET_CLOSED"
+    hhmm = now.hour * 100 + now.minute
+    if 800 <= hhmm < 850:
         return "PRE_MARKET"
-    if hhmm >= 2230 or hhmm < 500:
+    if 900 <= hhmm <= 1530:
         return "REGULAR"
-    if 500 <= hhmm < 900:
+    if 1530 < hhmm < 2000:
         return "AFTER_MARKET"
     return "MARKET_CLOSED"
 
@@ -82,7 +92,7 @@ def _decision(candidate: dict[str, Any], current_price: float, trade_strength: f
 
     if candidate.get("vcp_status") == "RALLY_EXHAUSTION":
         reasons.append("추격주의")
-    if candidate.get("alert_type") == "ACTION_ALERT":
+    if is_alphaforge_tracking_candidate(candidate):
         reasons.append("우선관찰")
 
     if current_price <= box_price:
@@ -123,6 +133,7 @@ def build_signal_rows(theme_data: dict[str, Any], market: str = "KR", now: datet
         trading_value = int(stock.cumulative_trading_value) if stock else 0
         supply_status = stock.supply_status if stock else "DATA_NA"
         decision = _decision(candidate, current_price, trade_strength, trading_value, session_status)
+        event = compute_event(candidate, current_price, change_rate, trade_strength, session_status)
 
         rows.append({
             "timestamp": timestamp,
@@ -132,6 +143,11 @@ def build_signal_rows(theme_data: dict[str, Any], market: str = "KR", now: datet
             "name": candidate.get("name", symbol),
             "tier": candidate.get("tier", ""),
             "alert_type": candidate.get("alert_type", ""),
+            "watch_alert_type": candidate.get("watch_alert_type", ""),
+            "legacy_label": candidate.get("legacy_label", ""),
+            "final_label": candidate.get("final_label", ""),
+            "display_label": candidate.get("display_label", ""),
+            "display_watch_alert_type": candidate.get("display_watch_alert_type", ""),
             "rs": candidate.get("rs", ""),
             "vcp_status": candidate.get("vcp_status", ""),
             "box_upper_price": candidate.get("box_upper_price"),
@@ -152,6 +168,10 @@ def build_signal_rows(theme_data: dict[str, Any], market: str = "KR", now: datet
             "decision": decision["decision"],
             "reasons": decision["reasons"],
             "failed_conditions": decision["failed_conditions"],
+            "event_level": event["event_level"],
+            "event_type": event["event_type"],
+            "event_reason": event["event_reason"],
+            "event_should_alert": event["event_should_alert"],
             "generated_at": candidate.get("generated_at", ""),
         })
     return rows

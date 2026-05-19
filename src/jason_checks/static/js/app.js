@@ -3,6 +3,29 @@
  * Real-time theme grid with top 4 stocks per theme
  */
 
+const ALPHAFORGE_TRACKING_LABELS = new Set([
+    'ACTION_ALERT',
+    'PRIORITY_WATCH',
+    'NEAR_BUY',
+    'BUY_CANDIDATE',
+]);
+
+function getAlphaForgeLabels(stock) {
+    if (!stock) return [];
+    return [
+        stock.alert_type,
+        stock.watch_alert_type,
+        stock.legacy_label,
+        stock.final_label,
+        stock.display_label,
+        stock.display_watch_alert_type,
+    ].filter(Boolean);
+}
+
+function isAlphaForgeTrackingCandidate(stock) {
+    return getAlphaForgeLabels(stock).some(label => ALPHAFORGE_TRACKING_LABELS.has(label));
+}
+
 function timaApp() {
     return {
         // State
@@ -26,6 +49,13 @@ function timaApp() {
         alphaforgeCandidatesGeneratedAt: '',
         copyStatus: 'idle',
         signalSaveStatus: 'idle',
+        // US Portfolio Watch state (only fetched when market === 'US')
+        usWatchlist: [],
+        usWatchlistUpdatedAt: '',
+        usWatchlistSession: '',
+        // KR Sector Leaders state (only fetched when market === 'KR')
+        krSectorLeaders: [],
+        krSectorLeadersUpdatedAt: '',
 
         // Methods
         async init() {
@@ -38,10 +68,30 @@ function timaApp() {
             this.loadSortMode();
             this.loadSurgeSortMode();
 
+            // ── Market persistence: URL query > localStorage > default KR ──
+            const targetMarket = this._getInitialMarket();
+            if (targetMarket !== this.market) {
+                try {
+                    const res = await fetch('/api/market', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ market: targetMarket })
+                    });
+                    if (res.ok) {
+                        this.market = targetMarket;
+                        localStorage.setItem('CHECKS_SELECTED_MARKET', targetMarket);
+                    }
+                } catch (e) {
+                    console.warn('Market restore failed:', e);
+                }
+            }
+
             // Load initial theme data
             await this.loadThemes();
             await this.loadSurges();
             await this.loadIndices();
+            if (this.market === 'US') await this.loadUsWatchlist();
+            if (this.market === 'KR') await this.loadKrSectorLeaders();
 
             // Connect WebSocket
             this.connectWebSocket();
@@ -56,6 +106,119 @@ function timaApp() {
             }, 500);
             // Indices refresh every 3s (backend polls every 5s)
             setInterval(() => this.loadIndices(), 3000);
+            // US Portfolio Watch refresh every 5s when market === 'US'
+            setInterval(() => {
+                if (this.market === 'US') this.loadUsWatchlist();
+            }, 5000);
+            // KR Sector Leaders refresh every 3s when market === 'KR'
+            setInterval(() => {
+                if (this.market === 'KR') this.loadKrSectorLeaders();
+            }, 3000);
+
+            // ── Focus / visibility refresh (background tab 복귀 시 즉시 갱신) ──
+            this._setupFocusRefresh();
+        },
+
+        async loadUsWatchlist() {
+            try {
+                const res = await fetch('/api/us/watchlist');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (Array.isArray(data.rows)) {
+                    this.usWatchlist = data.rows;
+                    this.usWatchlistUpdatedAt = data.updated_at || '';
+                    this.usWatchlistSession = data.session_status || '';
+                    // Sync sessionType from API for US market (more reliable than client clock)
+                    if (this.market === 'US' && this.usWatchlistSession) {
+                        const _SM = {
+                            REGULAR: 'regular', PRE_MARKET: 'pre',
+                            AFTER_MARKET: 'after', MARKET_CLOSED: 'closed',
+                        };
+                        this.sessionType = _SM[this.usWatchlistSession] || 'closed';
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load US watchlist:', e);
+            }
+        },
+
+        async loadKrSectorLeaders() {
+            try {
+                const res = await fetch('/api/kr/sector-leaders');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (Array.isArray(data.sectors)) {
+                    this.krSectorLeaders = data.sectors;
+                    this.krSectorLeadersUpdatedAt = data.updated_at || '';
+                }
+            } catch (e) {
+                console.error('Failed to load KR sector leaders:', e);
+            }
+        },
+
+        sectorStatusClass(level) {
+            if (level === 'RISK')      return 'text-red-600';
+            if (level === 'INFO')      return 'text-blue-600';
+            if (level === 'DATA_WAIT') return 'text-gray-400';
+            return 'text-gray-500';
+        },
+
+        sectorStatusIcon(level, type) {
+            if (level === 'RISK')              return '⚠️';
+            if (type  === 'STRONG_UP')         return '📈';
+            if (level === 'DATA_WAIT')         return '⏳';
+            return '·';
+        },
+
+        usEventColorClass(level) {
+            if (level === 'RISK') return 'text-red-600';
+            if (level === 'INFO') return 'text-blue-600';
+            if (level === 'OFF') return 'text-gray-400';
+            return 'text-gray-500';
+        },
+
+        // ── Null-safe display helpers ─────────────────────────────────────────
+        // Prevents null/undefined/NaN showing as "0" or "0.00%".
+        // Only actual finite numbers are rendered as numbers; everything else → '-'.
+
+        _isVal(v) {
+            return v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+        },
+        // ±XX.XX% format (for change_pct inline)
+        fmtPct(v, digits = 2) {
+            if (!this._isVal(v)) return '-';
+            const n = Number(v);
+            return `${n >= 0 ? '+' : ''}${n.toFixed(digits)}%`;
+        },
+        // ▲/▼ XX.XX% format (KR index / stock change)
+        fmtAbsPct(v, digits = 2) {
+            if (!this._isVal(v)) return '-';
+            const n = Number(v);
+            return `${n >= 0 ? '▲' : '▼'} ${Math.abs(n).toFixed(digits)}%`;
+        },
+        // Integer strength (toFixed(0))
+        fmtStr(v) {
+            if (!this._isVal(v)) return '-';
+            return Number(v).toFixed(0);
+        },
+        // Float strength (toFixed(1)) for theme-level display
+        fmtStr1(v) {
+            if (!this._isVal(v)) return '-';
+            return Number(v).toFixed(1);
+        },
+
+        formatUsPrice(p) {
+            if (p === null || p === undefined || p === '') return '-';
+            const n = Number(p);
+            if (!Number.isFinite(n) || n <= 0) return '-';
+            return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        },
+
+        formatUsChange(c) {
+            if (c === null || c === undefined || c === '') return '-';
+            const n = Number(c);
+            if (!Number.isFinite(n)) return '-';
+            return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
         },
 
         async setMarket(m) {
@@ -69,17 +232,15 @@ function timaApp() {
                 });
                 if (res.ok) {
                     this.market = m;
-                    // Clear data to prevent flicker
-                    this.themes = {};
-                    this.stocks = {};
-                    this.surges = [];
+                    localStorage.setItem('CHECKS_SELECTED_MARKET', m);
+                    // No pre-clear: Alpine x-if guards hide stale market data automatically.
+                    // Clearing before fetch would show "0" placeholders during the reload.
                     // Immediate reload
                     this.updateSessionType();
-                    await Promise.all([
-                        this.loadThemes(),
-                        this.loadSurges(),
-                        this.loadIndices()
-                    ]);
+                    const promises = [this.loadThemes(), this.loadSurges(), this.loadIndices()];
+                    if (m === 'US') promises.push(this.loadUsWatchlist());
+                    if (m === 'KR') promises.push(this.loadKrSectorLeaders());
+                    await Promise.all(promises);
                 }
             } catch (e) {
                 console.error('Failed to switch market:', e);
@@ -142,6 +303,102 @@ function timaApp() {
             return value > 0 ? 'up' : 'down';
         },
 
+        // -----------------------------------------------------------------
+        //  Day-Chart Sparkline (Yahoo-Finance-style mini SVG)
+        // -----------------------------------------------------------------
+        sparklineSvg(chart, width, height) {
+            const W  = Number(width)  || 120;
+            const H  = Number(height) || 32;
+            const status = chart && chart.status;
+
+            // ── placeholder (DATA_NA / collecting) ─────────────────────────
+            const midY = (H / 2 + 0.5).toFixed(1);
+            const placeholder = (label, cls) => `\
+<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
+<line x1="0" y1="${midY}" x2="${W}" y2="${midY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3"/>\
+<text x="${(W/2).toFixed(0)}" y="${(H/2+4).toFixed(0)}" text-anchor="middle" font-size="9" fill="${cls}" font-family="ui-sans-serif,system-ui">${label}</text>\
+</svg>`;
+
+            if (!chart || status === 'DATA_NA') return placeholder('DATA_NA', '#94a3b8');
+            const pts = Array.isArray(chart.points) ? chart.points : [];
+            if (status !== 'OK' || pts.length < 2) return placeholder('collecting', '#94a3b8');
+
+            const ys = pts.map(p => Number(p.p)).filter(v => Number.isFinite(v) && v > 0);
+            if (ys.length < 2) return placeholder('collecting', '#94a3b8');
+
+            const baseline = Number(chart.baseline);
+            const last     = ys[ys.length - 1];
+
+            // ── Yahoo-style y-axis: scale ONLY to intraday points ──────────
+            // baseline is NOT included in y-range calculation so tiny intraday
+            // moves fill the full chart height — exactly what Yahoo Finance does.
+            const rawMin = Math.min(...ys);
+            const rawMax = Math.max(...ys);
+            // Minimum visible range: 0.20 % of last price, so even a flat day
+            // shows a slight undulation rather than a dead-straight line.
+            const minRange = Math.abs(last) * 0.002;
+            const range    = Math.max(rawMax - rawMin, minRange);
+            const mid      = (rawMax + rawMin) / 2;
+            const lo       = mid - range / 2;
+            const hi       = mid + range / 2;
+
+            // Usable pixel band with small top/bottom padding
+            const topPad    = 3;
+            const bottomPad = 3;
+            const useH      = H - topPad - bottomPad;
+
+            const yOf = (v) => {
+                const frac = (hi - v) / (hi - lo);           // 0 at top, 1 at bottom
+                return (topPad + Math.min(Math.max(frac, 0), 1) * useH).toFixed(1);
+            };
+            const xOf = (i) => ((i / (ys.length - 1)) * (W - 2) + 1).toFixed(1);
+
+            // ── baseline dotted line ───────────────────────────────────────
+            // Clamp to visible area when baseline is outside the intraday range.
+            let baselineLineY;
+            if (Number.isFinite(baseline)) {
+                if (baseline >= lo && baseline <= hi) {
+                    baselineLineY = yOf(baseline);
+                } else if (last >= baseline) {
+                    // price is above baseline → baseline below the chart area → clamp near bottom
+                    baselineLineY = (H - bottomPad + 1).toFixed(1);
+                } else {
+                    // price is below baseline → baseline above the chart area → clamp near top
+                    baselineLineY = (topPad - 1).toFixed(1);
+                }
+            }
+            const baselineSvg = baselineLineY !== undefined
+                ? `<line x1="0" y1="${baselineLineY}" x2="${W}" y2="${baselineLineY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3"/>`
+                : '';
+
+            // ── colour: green if last >= baseline (or first point) ─────────
+            const up     = Number.isFinite(baseline) ? last >= baseline : last >= ys[0];
+            const stroke = up ? '#16a34a' : '#dc2626';
+            const fill   = up ? 'rgba(22,163,74,0.12)' : 'rgba(220,38,38,0.12)';
+
+            // ── SVG path ───────────────────────────────────────────────────
+            const linePath = ys.map((v, i) => `${i === 0 ? 'M' : 'L'}${xOf(i)},${yOf(v)}`).join(' ');
+            const areaPath = `M${xOf(0)},${H} ` +
+                             ys.map((v, i) => `L${xOf(i)},${yOf(v)}`).join(' ') +
+                             ` L${xOf(ys.length - 1)},${H} Z`;
+
+            return `\
+<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
+${baselineSvg}\
+<path d="${areaPath}" fill="${fill}" stroke="none"/>\
+<path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>\
+</svg>`;
+        },
+
+        sparklineMeta(chart) {
+            if (!chart) return '';
+            if (chart.status === 'DATA_NA') return 'DATA_NA';
+            if (chart.status !== 'OK') return `collecting · ${chart.point_count || 0}`;
+            const pct = Number(chart.change_from_baseline_pct);
+            const pctStr = Number.isFinite(pct) ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '-';
+            return `${chart.point_count}pts · ${pctStr}`;
+        },
+
         formatBoxPrice(value) {
             if (value === null || value === undefined || value === '') return '-';
             const n = Number(value);
@@ -166,6 +423,93 @@ function timaApp() {
                 RISK_ONLY: '위험/제외',
             };
             return labels[label] || label || '-';
+        },
+
+        intradayEvent(stock) {
+            // Prefer server-computed event if present (live API).
+            if (stock && stock.event_level && stock.event_type) {
+                return {
+                    event_level: stock.event_level,
+                    event_type: stock.event_type,
+                    event_reason: stock.event_reason || '',
+                    event_should_alert: !!stock.event_should_alert,
+                };
+            }
+            // Client-side fallback (mirrors Python event_layer.compute_event).
+            const LEVEL_PRIORITY = { DATA_WAIT: 0, OFF: 1, L1: 2, L2: 3, L3: 4, RISK: 5 };
+            const price = Number(stock?.price) || 0;
+            const chg = Number(stock?.change_pct) || 0;
+            const strength = Number(stock?.strength) || 0;
+            const box = Number(stock?.box_upper_price) || 0;
+            const horizon = stock?.horizon_label || '';
+            const alertType = stock?.alert_type || '';
+
+            if (this.sessionType !== 'regular') {
+                return { event_level: 'OFF', event_type: 'MARKET_CLOSED',
+                         event_reason: '장마감/비정규 세션', event_should_alert: false };
+            }
+            if (price <= 0) {
+                return { event_level: 'DATA_WAIT', event_type: 'NO_PRICE',
+                         event_reason: '현재가 대기', event_should_alert: false };
+            }
+
+            const cands = [];
+            if (box > 0) {
+                if (price < box) {
+                    const gapPct = ((box - price) / box) * 100;
+                    if (gapPct <= 1.0) {
+                        cands.push({ event_level: 'L1', event_type: 'BOX_NEAR',
+                            event_reason: `BOX ${this.formatBoxPrice(box)} 상단 근접 (이격 ${gapPct.toFixed(2)}%)`,
+                            event_should_alert: false });
+                    }
+                } else {
+                    if (strength < 100) {
+                        cands.push({ event_level: 'RISK', event_type: 'FAKEOUT_RISK',
+                            event_reason: `BOX ${this.formatBoxPrice(box)} 돌파했지만 체결강도 약함 (체결강도 ${strength.toFixed(0)})`,
+                            event_should_alert: true });
+                    } else if (strength < 120) {
+                        cands.push({ event_level: 'L2', event_type: 'BREAKOUT_WATCH',
+                            event_reason: `BOX ${this.formatBoxPrice(box)} 돌파 관찰 · 체결강도 ${strength.toFixed(0)}`,
+                            event_should_alert: true });
+                    } else {
+                        cands.push({ event_level: 'L3', event_type: 'BREAKOUT_STRONG',
+                            event_reason: `BOX ${this.formatBoxPrice(box)} 돌파 + 강한 체결강도 ${strength.toFixed(0)}`,
+                            event_should_alert: true });
+                    }
+                }
+            }
+            if (chg >= 7.0 && strength < 110) {
+                cands.push({ event_level: 'RISK', event_type: 'WEAK_CHASE_RISK',
+                    event_reason: `급등(+${chg.toFixed(2)}%)했지만 체결강도 부족(${strength.toFixed(0)}) · 추격주의`,
+                    event_should_alert: true });
+            }
+            if (chg <= -3.0) {
+                cands.push({ event_level: 'RISK', event_type: 'DROP_WATCH',
+                    event_reason: `후보 종목 장중 급락 관찰 (${chg.toFixed(2)}%)`,
+                    event_should_alert: true });
+            }
+
+            let chosen;
+            if (cands.length === 0) {
+                chosen = { event_level: 'L1', event_type: 'OBSERVING',
+                           event_reason: '특이 신호 없음', event_should_alert: false };
+            } else {
+                chosen = cands.reduce((a, b) =>
+                    (LEVEL_PRIORITY[b.event_level] ?? -1) > (LEVEL_PRIORITY[a.event_level] ?? -1) ? b : a);
+            }
+            if ((horizon === 'CHASE_RISK' || alertType === 'RISK_WATCH')
+                && !chosen.event_reason.includes('추격주의')) {
+                chosen = { ...chosen, event_reason: chosen.event_reason + ' · 추격주의' };
+            }
+            return chosen;
+        },
+
+        eventColorClass(level) {
+            if (level === 'RISK') return 'text-red-600';
+            if (level === 'L3') return 'text-green-700';
+            if (level === 'L2') return 'text-amber-700';
+            if (level === 'L1') return 'text-blue-600';
+            return 'text-gray-500';
         },
 
         intradayDecision(stock) {
@@ -204,7 +548,7 @@ function timaApp() {
             if (stock.vcp_status === 'RALLY_EXHAUSTION') {
                 reasons.push('추격주의');
             }
-            if (stock.alert_type === 'ACTION_ALERT') {
+            if (isAlphaForgeTrackingCandidate(stock)) {
                 reasons.push('우선관찰');
             }
 
@@ -337,6 +681,7 @@ function timaApp() {
             }
             for (const stock of picks) {
                 const decision = this.intradayDecision(stock);
+                const event = this.intradayEvent(stock);
                 const price = stock.price ? Number(stock.price).toLocaleString('ko-KR') : '-';
                 const changePct = `${(Number(stock.change_pct) || 0).toFixed(2)}%`;
                 const strength = `${(Number(stock.strength) || 0).toFixed(0)}`;
@@ -363,6 +708,8 @@ function timaApp() {
                         `개 ${this.formatSupplyFlow(stock, 'individual_flow')}`,
                         `DECISION ${decision.decision}`,
                         `사유 ${this.formatDecisionItems(decision.reasons)}`,
+                        `EVENT ${event.event_level} / ${event.event_type}`,
+                        `EVENT 사유 ${event.event_reason || '-'}`,
                         `현재가 ${price}`,
                         `등락률 ${changePct}`,
                         `체결강도 ${strength}`,
@@ -406,6 +753,46 @@ function timaApp() {
                 this.signalSaveStatus = 'idle';
             }, 1500);
         },
+
+        // ── Market persistence helpers ────────────────────────────────────────
+
+        _getInitialMarket() {
+            // Priority: URL query > localStorage > default 'KR'
+            const params = new URLSearchParams(window.location.search);
+            const qm = (params.get('market') || '').toUpperCase();
+            if (qm === 'US' || qm === 'KR') {
+                localStorage.setItem('CHECKS_SELECTED_MARKET', qm);
+                return qm;
+            }
+            const stored = localStorage.getItem('CHECKS_SELECTED_MARKET');
+            if (stored === 'US' || stored === 'KR') return stored;
+            return 'KR';
+        },
+
+        _setupFocusRefresh() {
+            let _lastRefresh = 0;
+            const THROTTLE_MS = 2000;  // 2초 throttle — 짧은 연속 이벤트 방지
+            const refresh = () => {
+                const now = Date.now();
+                if (now - _lastRefresh < THROTTLE_MS) return;
+                _lastRefresh = now;
+                console.log('🔄 Focus/visibility refresh', this.market);
+                if (this.market === 'US') {
+                    this.loadUsWatchlist();
+                } else {
+                    this.loadThemes();
+                    this.loadSurges();
+                    this.loadIndices();
+                    this.loadKrSectorLeaders();
+                }
+            };
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') refresh();
+            });
+            window.addEventListener('focus', refresh);
+        },
+
+        // ── Pinned themes ─────────────────────────────────────────────────────
 
         loadPinnedThemes() {
             try {
@@ -495,26 +882,43 @@ function timaApp() {
             this.currentTime = `${date} ${time}`;
         },
 
+        // ── ET helper: returns {dow, hhmm} in America/New_York ──────────────────
+        _etNow() {
+            const now = new Date();
+            const parts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                weekday: 'short',
+                hour: 'numeric',
+                minute: 'numeric',
+                hour12: false,
+            }).formatToParts(now);
+            const wd  = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+                          .indexOf(parts.find(p => p.type === 'weekday').value);
+            const h   = parseInt(parts.find(p => p.type === 'hour').value)   % 24;
+            const min = parseInt(parts.find(p => p.type === 'minute').value);
+            return { dow: wd, hhmm: h * 100 + min };
+        },
+
         updateSessionType() {
+            if (this.market === 'US') {
+                // Use actual ET time — fixes KST Sat ≡ ET Fri boundary
+                const { dow, hhmm } = this._etNow();
+                if (dow === 0 || dow === 6) { this.sessionType = 'closed'; return; }
+                if (hhmm >= 400 && hhmm < 930)   this.sessionType = 'pre';
+                else if (hhmm >= 930 && hhmm < 1600)  this.sessionType = 'regular';
+                else if (hhmm >= 1600 && hhmm < 2000) this.sessionType = 'after';
+                else                                   this.sessionType = 'closed';
+                return;
+            }
+            // KR: use local KST time
             const now = new Date();
             const dow = now.getDay();
             if (dow === 0 || dow === 6) { this.sessionType = 'closed'; return; }
-            
-            const hours = now.getHours();
-            const hhmm = hours * 100 + now.getMinutes();
-
-            if (this.market === 'KR') {
-                if (hhmm >= 800 && hhmm < 850) this.sessionType = 'pre';
-                else if (hhmm >= 900 && hhmm <= 1530) this.sessionType = 'regular';
-                else if (hhmm > 1530 && hhmm < 2000) this.sessionType = 'after';
-                else this.sessionType = 'closed';
-            } else {
-                // US Market (KST approximation)
-                if (hhmm >= 1700 && hhmm < 2230) this.sessionType = 'pre';
-                else if (hhmm >= 2230 || hhmm < 500) this.sessionType = 'regular';
-                else if (hhmm >= 500 && hhmm < 900) this.sessionType = 'after';
-                else this.sessionType = 'closed';
-            }
+            const hhmm = now.getHours() * 100 + now.getMinutes();
+            if (hhmm >= 800 && hhmm < 850) this.sessionType = 'pre';
+            else if (hhmm >= 900 && hhmm <= 1530) this.sessionType = 'regular';
+            else if (hhmm > 1530 && hhmm < 2000) this.sessionType = 'after';
+            else this.sessionType = 'closed';
         },
 
         async loadThemes() {
