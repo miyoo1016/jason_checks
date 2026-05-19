@@ -5,6 +5,7 @@
 
 # Database
 data/
+data/signal_journal/
 *.db
 *.db-shm
 *.db-wal

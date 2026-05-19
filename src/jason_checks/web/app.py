@@ -43,6 +43,8 @@ from jason_checks.alphaforge_candidates import (
     load_alphaforge_candidates_with_meta,
 )
 from jason_checks.signal_journal import save_signal_journal
+from jason_checks.decision_engine import run_decision_engine
+from jason_checks.signal_journal import get_session_status
 
 # Initialize logging
 setup_logging()
@@ -641,6 +643,38 @@ def create_app() -> FastAPI:
                 ui_merge_failed=ui_merge_failed,
             )
 
+        # Decision Engine
+        indices_snapshot = {
+            code: {"change_pct": idx.change_pct, "price": idx.price}
+            for code, idx in app_state.indices.items()
+        }
+        session_now = get_session_status(market=CURRENT_MARKET)
+        decision_summary = run_decision_engine(
+            alphaforge_picks=alphaforge_picks,
+            themes=themes_result,
+            indices=indices_snapshot,
+            session=session_now,
+        )
+        # Enrich alphaforge_picks with decision fields
+        decision_by_symbol = {r["symbol"]: r for r in decision_summary["results"]}
+        for pick in alphaforge_picks:
+            code_k = str(pick.get("code") or "")
+            dec = decision_by_symbol.get(code_k, {})
+            pick["decision_engine"] = dec
+            pick["de_decision"] = dec.get("decision", "")
+            pick["de_decision_display"] = dec.get("decision_display", "")
+            pick["de_confidence"] = dec.get("confidence_score", 0)
+            pick["de_data_confidence"] = dec.get("data_confidence", "")
+            pick["de_action_reason"] = dec.get("action_reason", "")
+            pick["de_no_buy_reason"] = dec.get("no_buy_reason", "")
+            pick["de_entry_trigger"] = dec.get("entry_trigger", "")
+            pick["de_invalidation"] = dec.get("invalidation_reason", "")
+            pick["de_invalidation_reason"] = dec.get("invalidation_reason", "")
+            pick["de_required_confirmations"] = dec.get("required_confirmations", [])
+            pick["de_chase_risk"] = dec.get("chase_risk", False)
+            pick["de_max_pct"] = dec.get("max_position_pct", 0)
+            pick["de_stable"] = dec.get("stable", False)
+
         return {
             "themes": themes_result,
             "market": CURRENT_MARKET,
@@ -654,7 +688,49 @@ def create_app() -> FastAPI:
             "alphaforge_picks": alphaforge_picks,
             "quote_polling": display_quote_status,
             "supply_data_reason": supply_reason,
+            "decision_counts": decision_summary["decision_counts"],
+            "decision_session": session_now,
+            "decision_market_gate": decision_summary["market_gate"],
         }
+
+    @app.get("/api/decision-summary")
+    async def get_decision_summary():
+        """Decision Engine 요약 API."""
+        alphaforge_theme = getattr(app, "alphaforge_theme_data", {}) or {}
+        picks_raw = alphaforge_theme.get("stocks", [])
+        stock_ticks = {
+            _normalize_symbol(code): {
+                "price": s.price, "change_pct": s.change_pct,
+                "cumulative_trading_value": s.cumulative_trading_value,
+                "strength": s.execution_strength,
+                "supply_status": s.supply_status,
+            }
+            for code, s in app_state.stocks.items()
+        }
+        enriched_picks = []
+        for p in picks_raw:
+            code = _normalize_symbol(p.get("code", ""))
+            tick = stock_ticks.get(code, {})
+            enriched_picks.append({**p, **tick, "code": code})
+
+        indices_snapshot = {
+            code: {"change_pct": idx.change_pct, "price": idx.price}
+            for code, idx in app_state.indices.items()
+        }
+        session_now = get_session_status(market=CURRENT_MARKET)
+
+        # Lightweight themes for sector gate
+        themes_lite = {
+            k: {"leaders": v.get("stocks", [])[:4], "avg_change_pct": 0}
+            for k, v in (getattr(app, "theme_data", {}) or {}).items()
+        }
+        summary = run_decision_engine(
+            alphaforge_picks=enriched_picks,
+            themes=themes_lite,
+            indices=indices_snapshot,
+            session=session_now,
+        )
+        return summary
 
     @app.get("/api/indices")
     async def get_indices():

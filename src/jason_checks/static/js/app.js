@@ -64,6 +64,10 @@ function timaApp() {
         // KR Sector Leaders state (only fetched when market === 'KR')
         krSectorLeaders: [],
         krSectorLeadersUpdatedAt: '',
+        // Decision Engine state
+        decisionCounts: { BUY_NOW: 0, STARTER_POSITION: 0, CONDITIONAL_BUY: 0, WATCH_ONLY: 0, AVOID: 0 },
+        decisionSession: '',
+        decisionMarketGate: {},
 
         // Methods
         async init() {
@@ -810,6 +814,59 @@ ${baselineSvg}\
             return 'SWING_WATCH';
         },
 
+        // Decision Engine helpers
+        deDecisionBadgeClass(decision) {
+            const m = {
+                BUY_NOW: 'bg-green-600 text-white',
+                STARTER_POSITION: 'bg-blue-500 text-white',
+                CONDITIONAL_BUY: 'bg-amber-500 text-white',
+                WATCH_ONLY: 'bg-gray-400 text-white',
+                AVOID: 'bg-red-600 text-white',
+            };
+            return m[decision] || 'bg-gray-200 text-gray-600';
+        },
+
+        deDecisionKo(decision) {
+            const m = {
+                BUY_NOW: '매수 가능',
+                STARTER_POSITION: '소량 선취',
+                CONDITIONAL_BUY: '조건부 매수',
+                WATCH_ONLY: '관찰',
+                AVOID: '매수 금지',
+            };
+            return m[decision] || decision || '-';
+        },
+
+        deActionBoardTotal() {
+            const c = this.decisionCounts || {};
+            return (c.BUY_NOW || 0) + (c.STARTER_POSITION || 0) + (c.CONDITIONAL_BUY || 0) + (c.WATCH_ONLY || 0) + (c.AVOID || 0);
+        },
+
+        deHasBuySignal() {
+            const c = this.decisionCounts || {};
+            return (c.BUY_NOW || 0) > 0 || (c.STARTER_POSITION || 0) > 0;
+        },
+
+        deDecisionText(stock) {
+            return stock?.de_decision || stock?.decision_engine?.decision || '-';
+        },
+
+        deConfidenceText(stock) {
+            const score = stock?.de_confidence ?? stock?.decision_engine?.confidence_score;
+            if (score === null || score === undefined || score === '') return '-';
+            return `${Number(score) || 0}점`;
+        },
+
+        deDataConfidenceText(stock) {
+            return stock?.de_data_confidence || stock?.decision_engine?.data_confidence || '-';
+        },
+
+        deMaxPositionText(stock) {
+            const pct = stock?.de_max_pct ?? stock?.decision_engine?.max_position_pct;
+            if (pct === null || pct === undefined || pct === '') return '0%';
+            return `${Number(pct) || 0}%`;
+        },
+
         liveMomentumPicks() {
             const alphaByCode = new Map(this.alphaForgePicks().map(s => [s.code, s]));
             const rows = Object.values(this.stocks || []).map(stock => {
@@ -863,6 +920,16 @@ ${baselineSvg}\
             lines.push(`MARKET: ${this.market} / ${this.marketOpen() ? 'MARKET OPEN' : 'MARKET CLOSED'}`);
             lines.push(`AlphaForge 후보 로드: ${this.alphaforgeCandidatesLoaded}개 / ${this.alphaforgeCandidatesGeneratedAt || '-'}`);
             lines.push('');
+            lines.push('[Action Board]');
+            const dc = this.decisionCounts || {};
+            lines.push(`BUY_NOW ${dc.BUY_NOW || 0} / STARTER ${dc.STARTER_POSITION || 0} / CONDITIONAL ${dc.CONDITIONAL_BUY || 0} / WATCH ${dc.WATCH_ONLY || 0} / AVOID ${dc.AVOID || 0}`);
+            if (!this.deHasBuySignal()) {
+                const reason = this.decisionSession === 'REGULAR'
+                    ? (this.decisionMarketGate?.reason || '조건 미충족')
+                    : 'MARKET_CLOSED';
+                lines.push(`오늘 매수추천 없음: ${reason}`);
+            }
+            lines.push('');
             lines.push('[Market Indices]');
             const indexEntries = Object.entries(this.indices || {});
             if (indexEntries.length === 0) {
@@ -906,6 +973,16 @@ ${baselineSvg}\
             for (const stock of picks) {
                 const decision = this.intradayDecision(stock);
                 const event = this.intradayEvent(stock);
+                const deDecision = this.deDecisionText(stock);
+                const deConfidence = this.deConfidenceText(stock);
+                const deDataConfidence = this.deDataConfidenceText(stock);
+                const deReason = stock.de_no_buy_reason || stock.de_action_reason || '-';
+                const deTrigger = stock.de_entry_trigger || '-';
+                const deInvalidation = stock.de_invalidation || stock.de_invalidation_reason || '-';
+                const deMaxPct = this.deMaxPositionText(stock);
+                const deConfirmations = Array.isArray(stock.de_required_confirmations)
+                    ? stock.de_required_confirmations.join(', ')
+                    : (stock.de_required_confirmations || '-');
                 const price = stock.price ? Number(stock.price).toLocaleString('ko-KR') : '-';
                 const changePct = `${(Number(stock.change_pct) || 0).toFixed(2)}%`;
                 const strength = this.formatStrength(stock.strength);
@@ -930,8 +1007,16 @@ ${baselineSvg}\
                         `외 ${this.formatSupplyFlow(stock, 'foreign_flow')}`,
                         `기 ${this.formatSupplyFlow(stock, 'institution_flow')}`,
                         `개 ${this.formatSupplyFlow(stock, 'individual_flow')}`,
-                        `DECISION ${decision.decision}`,
-                        `사유 ${this.formatDecisionItems(decision.reasons)}`,
+                        `DECISION_ENGINE ${deDecision}`,
+                        `confidence ${deConfidence}`,
+                        `data_confidence ${deDataConfidence}`,
+                        `no_buy_reason ${deReason}`,
+                        `entry_trigger ${deTrigger}`,
+                        `invalidation ${deInvalidation}`,
+                        `max_position_pct ${deMaxPct}`,
+                        `required_confirmations ${deConfirmations || '-'}`,
+                        `LEGACY_DECISION ${decision.decision}`,
+                        `legacy 사유 ${this.formatDecisionItems(decision.reasons)}`,
                         `EVENT ${event.event_level} / ${event.event_type}`,
                         `EVENT 사유 ${event.event_reason || '-'}`,
                         `현재가 ${price}`,
@@ -1201,6 +1286,10 @@ ${baselineSvg}\
                         this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
                     }
                 }
+                // Decision Engine state
+                if (data.decision_counts) this.decisionCounts = data.decision_counts;
+                if (data.decision_session) this.decisionSession = data.decision_session;
+                if (data.decision_market_gate) this.decisionMarketGate = data.decision_market_gate;
             } catch (error) {
                 console.error('Failed to load themes:', error);
             }

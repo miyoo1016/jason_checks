@@ -162,6 +162,32 @@
                         <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"
                              x-text="`산업군 데이터 없음${themeLoadReason ? ': ' + themeLoadReason : ''}`"></div>
                     </template>
+
+                    <!-- Action Board -->
+                    <div class="mb-2 rounded-lg border bg-white shadow-sm px-3 py-2">
+                        <div class="flex flex-wrap items-center gap-2 text-[11px] font-black">
+                            <span class="text-gray-500 uppercase tracking-wider">오늘의 행동판</span>
+                            <span class="px-2 py-0.5 rounded text-white"
+                                  :class="decisionCounts.BUY_NOW > 0 ? 'bg-green-600' : 'bg-gray-200 text-gray-500'"
+                                  x-text="`BUY_NOW ${decisionCounts.BUY_NOW || 0}`"></span>
+                            <span class="px-2 py-0.5 rounded text-white"
+                                  :class="decisionCounts.STARTER_POSITION > 0 ? 'bg-blue-500' : 'bg-gray-200 text-gray-500'"
+                                  x-text="`STARTER ${decisionCounts.STARTER_POSITION || 0}`"></span>
+                            <span class="px-2 py-0.5 rounded text-white"
+                                  :class="decisionCounts.CONDITIONAL_BUY > 0 ? 'bg-amber-500' : 'bg-gray-200 text-gray-500'"
+                                  x-text="`CONDITIONAL ${decisionCounts.CONDITIONAL_BUY || 0}`"></span>
+                            <span class="px-2 py-0.5 rounded bg-gray-400 text-white"
+                                  x-text="`WATCH ${decisionCounts.WATCH_ONLY || 0}`"></span>
+                            <span class="px-2 py-0.5 rounded bg-red-100 text-red-700"
+                                  x-text="`AVOID ${decisionCounts.AVOID || 0}`"></span>
+                            <template x-if="!deHasBuySignal() && deActionBoardTotal() > 0">
+                                <span class="text-gray-400 normal-case font-bold">— 오늘 매수추천 없음</span>
+                            </template>
+                            <span class="ml-auto text-gray-400 normal-case font-medium"
+                                  x-text="decisionSession === 'REGULAR' ? (decisionMarketGate?.reason || '') : '장 마감 — 내일 장중 확인'"></span>
+                        </div>
+                    </div>
+
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-2 mb-4">
                         <div class="theme-card" style="padding: 0.45rem; border-radius: 7px;">
                             <div class="mb-1.5 pb-1.5 border-b border-gray-100">
@@ -201,16 +227,40 @@
                                             </div>
                                             <div class="w-[64px] h-[18px] justify-self-end" x-html="sparklineSvg(stockChart(stock), 64, 18)"></div>
                                         </div>
-                                        <div class="mt-0.5 flex justify-between gap-1 text-[8px] mono font-black">
-                                            <span :class="{
-                                                     'text-gray-500': intradayDecision(stock).decision === 'MARKET_CLOSED' || intradayDecision(stock).decision === 'DATA_WAIT',
-                                                     'text-amber-700': intradayDecision(stock).decision === 'IN_BOX_WAIT' || intradayDecision(stock).decision === 'BREAKOUT_WATCH',
-                                                     'text-green-700': intradayDecision(stock).decision === 'ENTRY_OK',
-                                                     'text-red-600': intradayDecision(stock).decision === 'FAKEOUT_RISK'
-                                                   }"
-                                                  x-text="`DECISION ${intradayDecision(stock).decision}`"></span>
-                                            <span class="text-amber-700" x-text="`BOX ${formatBoxPrice(stock.box_upper_price)}`"></span>
+                                        <!-- Decision Engine Badge Row -->
+                                        <div class="mt-0.5 flex flex-wrap gap-1 items-center leading-none">
+                                            <span class="px-1 py-0.5 rounded text-[7px] font-black"
+                                                  :class="deDecisionBadgeClass(stock.de_decision)"
+                                                  x-text="deDecisionText(stock)"></span>
+                                            <span class="text-[7px] mono font-black text-gray-500"
+                                                  x-text="deConfidenceText(stock)"></span>
+                                            <span class="text-[7px] mono font-black text-gray-400"
+                                                  x-text="deDataConfidenceText(stock)"></span>
+                                            <span x-show="stock.de_chase_risk" class="px-1 py-0.5 rounded text-[7px] font-black bg-orange-100 text-orange-700">추격주의</span>
+                                            <span class="text-[7px] mono text-gray-400"
+                                                  x-text="`비중 ${deMaxPositionText(stock)}`"></span>
                                         </div>
+                                        <!-- No-buy / entry trigger -->
+                                        <template x-if="stock.de_no_buy_reason">
+                                            <div class="mt-0.5 text-[7px] text-red-500 font-bold truncate"
+                                                 x-text="`이유: ${stock.de_no_buy_reason}`"></div>
+                                        </template>
+                                        <template x-if="!stock.de_no_buy_reason && stock.de_action_reason">
+                                            <div class="mt-0.5 text-[7px] text-gray-500 font-bold truncate"
+                                                 x-text="`이유: ${stock.de_action_reason}`"></div>
+                                        </template>
+                                        <template x-if="stock.de_entry_trigger">
+                                            <div class="mt-0.5 text-[7px] text-amber-600 font-bold truncate"
+                                                 x-text="`트리거: ${stock.de_entry_trigger}`"></div>
+                                        </template>
+                                        <template x-if="stock.de_invalidation">
+                                            <div class="mt-0.5 text-[7px] text-gray-400 truncate"
+                                                 x-text="`무효: ${stock.de_invalidation}`"></div>
+                                        </template>
+                                        <template x-if="stock.de_required_confirmations && stock.de_required_confirmations.length">
+                                            <div class="mt-0.5 text-[7px] text-gray-400 truncate"
+                                                 x-text="`확인: ${stock.de_required_confirmations.join(', ')}`"></div>
+                                        </template>
                                     </div>
                                 </template>
                                 <template x-if="alphaForgePicks().length === 0">
