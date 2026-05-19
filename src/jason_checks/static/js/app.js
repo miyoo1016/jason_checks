@@ -222,6 +222,41 @@ function timaApp() {
             return Number(v).toFixed(1);
         },
 
+        getThemeMinMaxLog() {
+            const strengths = Object.values(this.themes || {})
+                .map(t => Number(t?.strength))
+                .filter(s => this._isVal(s) && !isNaN(s) && s >= 0);
+            if (strengths.length === 0) return { min: 0, max: 0 };
+            const logs = strengths.map(s => Math.log1p(s));
+            return {
+                min: Math.min(...logs),
+                max: Math.max(...logs)
+            };
+        },
+
+        fmtThemeStrength(v) {
+            if (!this._isVal(v)) return '-';
+            const raw = Number(v);
+            if (isNaN(raw) || raw < 0) return '-';
+
+            const { min, max } = this.getThemeMinMaxLog();
+            if (max === min) return '50';
+
+            const logVal = Math.log1p(raw);
+            let val = ((logVal - min) / (max - min)) * 99 + 1;
+            if (val < 1) val = 1;
+            if (val > 100) val = 100;
+            return Math.round(val).toFixed(0);
+        },
+
+        fmtThemeDirection(changePct) {
+            if (!this._isVal(changePct)) return '중립';
+            const pct = Number(changePct);
+            if (pct >= 1.0) return '강세';
+            if (pct <= -1.0) return '약세';
+            return '중립';
+        },
+
         formatUsPrice(p) {
             if (p === null || p === undefined || p === '') return '-';
             const n = Number(p);
@@ -823,6 +858,7 @@ ${baselineSvg}\
                 CONDITIONAL_BUY: 'bg-amber-500 text-white',
                 WATCH_ONLY: 'bg-gray-400 text-white',
                 AVOID: 'bg-red-600 text-white',
+                MARKET_CLOSED: 'bg-gray-500 text-white',
             };
             return m[decision] || 'bg-gray-200 text-gray-600';
         },
@@ -834,6 +870,7 @@ ${baselineSvg}\
                 CONDITIONAL_BUY: '조건부 매수',
                 WATCH_ONLY: '관찰',
                 AVOID: '매수 금지',
+                MARKET_CLOSED: '장마감',
             };
             return m[decision] || decision || '-';
         },
@@ -982,7 +1019,7 @@ ${baselineSvg}\
                 lines.push(`산업군 데이터 없음${this.themeLoadReason ? `: ${this.themeLoadReason}` : ''}`);
             }
             for (const [themeName, theme] of themeEntries) {
-                lines.push(`${theme.display_name || themeName} / 강도 ${this.fmtStr1(theme.strength)} / 등락 ${this.fmtPct(theme.avg_change_pct)}`);
+                lines.push(`${theme.display_name || themeName} / 거래활성 ${this.fmtThemeStrength(theme.strength)} / 방향 ${this.fmtThemeDirection(theme.avg_change_pct)} / 등락 ${this.fmtPct(theme.avg_change_pct)}`);
                 for (const stock of this.compactLeaders(theme)) {
                     lines.push([
                         `- ${stock.name || stock.code} (${stock.code})`,
@@ -1003,8 +1040,10 @@ ${baselineSvg}\
             for (const stock of picks) {
                 const decision = this.intradayDecision(stock);
                 const event = this.intradayEvent(stock);
-                const deDecision = this.deDecisionText(stock);
-                const deConfidence = this.deConfidenceText(stock);
+                const deDecision = this.deDecisionKo(this.deDecisionText(stock));
+                const deConfidence = stock.de_confidence !== undefined && stock.de_confidence !== null
+                    ? `매수신뢰 ${stock.de_confidence}점`
+                    : '매수신뢰 0점';
                 const deDataConfidence = this.deDataConfidenceText(stock);
                 const deReason = stock.de_no_buy_reason || stock.de_action_reason || '-';
                 const deTrigger = stock.de_entry_trigger || '-';
