@@ -406,6 +406,9 @@ def evaluate_stock(
     vcp_status = str(stock.get("vcp_status") or "")
     box_price = float(stock.get("box_upper_price") or 0)
 
+    merge_failed = stock.get("merge_failed", False)
+    polling_in_progress = stock.get("polling_in_progress", False)
+
     data_quality = _data_quality(stock)
     data_conf = str(data_quality["data_confidence"])
     chase = _chase_risk(change_pct, strength, box_price, price)
@@ -446,18 +449,30 @@ def evaluate_stock(
             "reason_codes": reason_codes,
             **data_quality,
             **setup,
+            "merge_failed": merge_failed,
         }
 
     # ── Hard Gates ──────────────────────────────────────────────────────────
     if price <= 0:
-        no_buy_reasons.append("현재가 없음")
-        _record_signal(symbol, "AVOID")
-        result = _make_result(symbol, name, "AVOID", 0, data_conf,
-                              "데이터 대기", "현재가 없음", "", "",
-                              False, 0, [], theme_name, False,
-                              price, box_price, reason_codes, data_quality)
-        result.update(setup)
-        return result
+        if polling_in_progress:
+            _record_signal(symbol, "DATA_WAIT")
+            result = _make_result(symbol, name, "DATA_WAIT", 10, "LOW",
+                                  "현재가 폴링 대기 중", "DATA_WAIT", "", "",
+                                  False, 0, [], theme_name, False,
+                                  price, box_price, reason_codes, data_quality,
+                                  merge_failed=merge_failed)
+            result.update(setup)
+            return result
+        else:
+            no_buy_reasons.append("현재가 없음")
+            _record_signal(symbol, "AVOID")
+            result = _make_result(symbol, name, "AVOID", 0, data_conf,
+                                  "데이터 대기", "현재가 없음", "", "",
+                                  False, 0, [], theme_name, False,
+                                  price, box_price, reason_codes, data_quality,
+                                  merge_failed=merge_failed)
+            result.update(setup)
+            return result
 
     if alert_type == "RISK_WATCH":
         no_buy_reasons.append("RISK_WATCH 경보")
@@ -597,6 +612,7 @@ def evaluate_stock(
         entry_trigger, invalidation,
         chase, max_position_pct, required_confirmations,
         theme_name, stable, price, box_price, reason_codes, data_quality,
+        merge_failed=merge_failed
     )
     result.update(setup)
     return result
@@ -606,13 +622,14 @@ def _make_result(symbol, name, decision, score, data_conf,
                  action_reason, no_buy_reason, entry_trigger,
                  invalidation_reason, chase, max_pct, req_conf,
                  theme, stable, price=0.0, box_price=0.0,
-                 reason_codes=None, data_quality=None) -> dict[str, Any]:
+                 reason_codes=None, data_quality=None, merge_failed=False) -> dict[str, Any]:
     decision_display = {
         "BUY_NOW": "매수 가능",
         "STARTER_POSITION": "소량 선취",
         "CONDITIONAL_BUY": "조건부 매수",
         "WATCH_ONLY": "관찰",
         "AVOID": "매수 금지",
+        "DATA_WAIT": "데이터 대기",
     }.get(decision, decision)
     quality = dict(data_quality or {})
     return {
@@ -640,6 +657,7 @@ def _make_result(symbol, name, decision, score, data_conf,
         "next_session_trigger": entry_trigger,
         "next_session_plan": action_reason or "장중 조건 확인",
         "setup_reason": action_reason or no_buy_reason or "관찰 데이터 대기",
+        "merge_failed": merge_failed,
     }
 
 
@@ -677,6 +695,7 @@ def run_decision_engine(
         "CONDITIONAL_BUY": 0,
         "WATCH_ONLY": 0,
         "AVOID": 0,
+        "DATA_WAIT": 0,
     }
     for r in results:
         d = r.get("decision", "WATCH_ONLY")
@@ -720,6 +739,32 @@ def run_decision_engine(
 
     journal_status = _write_decision_journal(results, session, market_gate)
 
+    forward_test_summary = {
+        "status": "DATA_INSUFFICIENT",
+        "message": "평가기 로드 실패"
+    }
+    try:
+        from jason_checks.forward_test import run_forward_test
+        forward_test_summary = run_forward_test()
+    except Exception as e:
+        logger.exception("forward_test_integration_failed", error=str(e))
+        forward_test_summary = {
+            "status": "DATA_INSUFFICIENT",
+            "message": f"평가 중 예외 발생: {str(e)}",
+            "horizons": {},
+            "by_decision": {},
+            "by_setup_label": {},
+            "by_market_gate_level": {},
+            "by_reason_code": {},
+            "blocked_quality": {
+                "blocked_count": 0,
+                "good_block_count": 0,
+                "missed_opportunity_count": 0,
+                "missed_opportunity_symbols": [],
+                "quality_grade": "아직 데이터 부족"
+            }
+        }
+
     return {
         "market_gate": market_gate,
         "market_gate_level": market_gate.get("market_gate_level"),
@@ -740,6 +785,7 @@ def run_decision_engine(
         "suspicious_sector_members": sector_audit["suspicious_sector_members"],
         "journal_write_status": journal_status,
         "journal_status": journal_status,
+        "forward_test_summary": forward_test_summary,
     }
 
 
@@ -788,6 +834,7 @@ def _write_decision_journal(results: list[dict], session: str, market_gate: dict
         written = 0
         with open(path, "a", encoding="utf-8") as f:
             for r in results:
+                price = float(r.get("price") or 0.0)
                 row = {
                     "timestamp": now_ts,
                     "session": session,
@@ -808,6 +855,8 @@ def _write_decision_journal(results: list[dict], session: str, market_gate: dict
                     "data_confidence": r["data_confidence"],
                     "data_quality_flags": r.get("data_quality_flags", []),
                 }
+                if price <= 0.0:
+                    row["excluded_reason"] = "PRICE_MISSING"
                 f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
                 written += 1
         return {"ok": True, "path": str(path), "written": written}

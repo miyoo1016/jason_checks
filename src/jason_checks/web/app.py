@@ -555,10 +555,17 @@ def create_app() -> FastAPI:
         if alphaforge_theme:
             alpha_data = {"AlphaForge": alphaforge_theme}
             alpha_leaders = select_leaders("AlphaForge", stock_ticks, alpha_data, sort_mode=sort)
+
+            quote_status = getattr(app, "quote_polling_status", {})
+            polling_in_progress = quote_status.get("in_progress", False)
+            if not quote_status.get("completed_at"):
+                polling_in_progress = True
+
             for leader in alpha_leaders:
-                code_norm = _normalize_symbol(leader["code"])
+                code_norm = _normalize_symbol(leader.get("code") or leader.get("symbol") or "")
                 ld = {
                     "code": code_norm,
+                    "symbol": code_norm,
                     "name": leader["name"],
                     "score": leader["score"],
                     "tier": leader.get("tier", ""),
@@ -579,6 +586,17 @@ def create_app() -> FastAPI:
                 }
                 if code_norm in stock_ticks:
                     ld.update(stock_ticks[code_norm])
+
+                app_stock = app_state.stocks.get(code_norm)
+                app_state_price = app_stock.price if app_stock else 0.0
+                price_in_ld = float(ld.get("price") or 0.0)
+                merge_failed = False
+                if app_state_price > 0.0 and price_in_ld <= 0.0:
+                    merge_failed = True
+                    logger.warning("merge_failed_detected_in_themes", symbol=code_norm, app_state_price=app_state_price)
+
+                ld["merge_failed"] = merge_failed
+                ld["polling_in_progress"] = polling_in_progress
                 alphaforge_picks.append(ld)
 
         theme_rows = [
@@ -715,6 +733,7 @@ def create_app() -> FastAPI:
             "sector_audit_warnings": decision_summary.get("sector_audit_warnings", []),
             "duplicated_symbols": decision_summary.get("duplicated_symbols", []),
             "suspicious_sector_members": decision_summary.get("suspicious_sector_members", []),
+            "forward_test_summary": decision_summary.get("forward_test_summary", {}),
         }
 
     @app.get("/api/decision-summary")
@@ -733,11 +752,33 @@ def create_app() -> FastAPI:
             }
             for code, s in app_state.stocks.items()
         }
+
+        quote_status = getattr(app, "quote_polling_status", {})
+        polling_in_progress = quote_status.get("in_progress", False)
+        if not quote_status.get("completed_at"):
+            polling_in_progress = True
+
         enriched_picks = []
         for p in picks_raw:
-            code = _normalize_symbol(p.get("code", ""))
+            code = _normalize_symbol(p.get("code") or p.get("symbol") or p.get("ticker") or "")
             tick = stock_ticks.get(code, {})
-            enriched_picks.append({**p, **tick, "code": code})
+
+            app_stock = app_state.stocks.get(code)
+            app_state_price = app_stock.price if app_stock else 0.0
+            price_in_tick = float(tick.get("price") or 0.0)
+            merge_failed = False
+            if app_state_price > 0.0 and price_in_tick <= 0.0:
+                merge_failed = True
+                logger.warning("merge_failed_detected_in_summary", symbol=code, app_state_price=app_state_price)
+
+            enriched_picks.append({
+                **p,
+                **tick,
+                "code": code,
+                "symbol": code,
+                "merge_failed": merge_failed,
+                "polling_in_progress": polling_in_progress
+            })
 
         indices_snapshot = {
             code: {"change_pct": idx.change_pct, "price": idx.price}

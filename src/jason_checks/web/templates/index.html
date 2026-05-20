@@ -23,10 +23,10 @@
                     </div>
                     <!-- Market Toggle Switch -->
                     <div class="flex bg-gray-100 p-0.5 rounded-lg text-[10px] font-black border border-gray-200">
-                        <button @click="setMarket('KR')" 
+                        <button @click="setMarket('KR')"
                                 :class="market === 'KR' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-400'"
                                 class="px-4 py-1.5 rounded-md transition-all duration-200">KOREA</button>
-                        <button @click="setMarket('US')" 
+                        <button @click="setMarket('US')"
                                 :class="market === 'US' ? 'bg-white shadow-sm text-red-600' : 'text-gray-400'"
                                 class="px-4 py-1.5 rounded-md transition-all duration-200">USA</button>
                     </div>
@@ -34,10 +34,10 @@
                 <div class="flex gap-4 items-center">
                     <!-- Tab Navigation -->
                     <nav class="flex gap-1 bg-gray-100 p-1 rounded-xl">
-                        <button @click="currentTab = 'dashboard'" 
+                        <button @click="currentTab = 'dashboard'"
                                 :class="currentTab === 'dashboard' ? 'bg-white shadow-sm text-black' : 'text-gray-500'"
                                 class="px-4 py-2 rounded-lg text-xs font-bold transition-all">실시간 대시보드</button>
-                        <button @click="currentTab = 'scan'" 
+                        <button @click="currentTab = 'scan'"
                                 :class="currentTab === 'scan' ? 'bg-white shadow-sm text-black' : 'text-gray-500'"
                                 class="px-4 py-2 rounded-lg text-xs font-bold transition-all">📊 가치투자 스캔</button>
                     </nav>
@@ -56,7 +56,7 @@
                 </div>
             </div>
         </header>
-        
+
         <!-- Market Index Bar (KOSPI / KOSDAQ) -->
         <div class="bg-white border-b border-gray-200 py-2 sticky top-[73px] z-10 shadow-sm">
             <div class="max-w-7xl mx-auto px-4 grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -203,6 +203,108 @@
                             <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
                                   x-text="deSectorAuditText()"></span>
                         </div>
+                    </div>
+
+                    <!-- Forward Test Evaluator Dashboard Card (Retrospective Verification v1) -->
+                    <div class="mb-3 rounded-lg border border-purple-200 bg-purple-50/10 shadow-sm p-3.5">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-purple-100 pb-2 mb-2">
+                            <div class="flex items-center gap-1.5 text-xs font-black text-purple-900 uppercase tracking-wider">
+                                <svg class="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <span>의사결정 사후 검증 (Forward Test v1)</span>
+                            </div>
+                            <span class="text-[9.5px] text-purple-600 font-medium"
+                                  x-text="forwardTestSummary ? `마지막 분석: ${new Date(forwardTestSummary.last_updated).toLocaleTimeString('ko-KR')}` : ''"></span>
+                        </div>
+
+                        <!-- 데이터 부족 상태 -->
+                        <template x-if="!forwardTestSummary || forwardTestSummary.status === 'DATA_INSUFFICIENT'">
+                            <div class="text-center py-4 bg-white/60 rounded border border-dashed border-purple-200">
+                                <span class="text-[11px] font-bold text-purple-800/60 block" x-text="forwardTestSummary ? forwardTestSummary.message : '로딩 대기 중...'"></span>
+                                <span class="text-[9.5px] text-slate-400 mt-1 block">의사결정 신호 축적 및 주식 시세 데이터 매칭이 진행되면 사후 성과 통계가 활성화됩니다.</span>
+                            </div>
+                        </template>
+
+                        <!-- 성과 통계 활성 상태 -->
+                        <template x-if="forwardTestSummary && forwardTestSummary.status === 'OK'">
+                            <div>
+                                <!-- 4 Horizon Grid -->
+                                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10.5px]">
+                                    <template x-for="hz in ['1d', '3d', '5d', '10d']" :key="hz">
+                                        <div class="bg-white/80 border rounded p-2 flex flex-col justify-between"
+                                             :class="{
+                                                 'border-purple-200 shadow-sm': forwardTestSummary.horizons[hz].status === 'OK',
+                                                 'border-slate-100 opacity-60': forwardTestSummary.horizons[hz].status !== 'OK'
+                                             }">
+                                            <div class="flex justify-between items-center font-black mb-1">
+                                                <span class="text-[11px] text-purple-900" x-text="`${hz} 성과`"></span>
+                                                <span class="px-1 py-0.2 rounded text-[8px]"
+                                                      :class="{
+                                                          'bg-purple-100 text-purple-800': forwardTestSummary.horizons[hz].status === 'OK',
+                                                          'bg-slate-100 text-slate-500': forwardTestSummary.horizons[hz].status !== 'OK'
+                                                      }"
+                                                      x-text="forwardTestSummary.horizons[hz].status === 'OK' ? `${forwardTestSummary.horizons[hz].count}건` : 'N/A'"></span>
+                                            </div>
+
+                                            <template x-if="forwardTestSummary.horizons[hz].status === 'OK'">
+                                                <div class="space-y-1">
+                                                    <div class="flex justify-between items-baseline">
+                                                        <span class="text-[9px] text-slate-500 font-bold">평균수익률</span>
+                                                        <span class="font-bold font-mono text-[11px]"
+                                                              :class="forwardTestSummary.horizons[hz].avg_return > 0 ? 'text-red-500' : (forwardTestSummary.horizons[hz].avg_return < 0 ? 'text-blue-500' : 'text-slate-700')"
+                                                              x-text="`${forwardTestSummary.horizons[hz].avg_return > 0 ? '+' : ''}${forwardTestSummary.horizons[hz].avg_return.toFixed(2)}%`"></span>
+                                                    </div>
+                                                    <div class="flex justify-between">
+                                                        <span class="text-[9px] text-slate-500 font-bold">승률</span>
+                                                        <span class="font-bold font-mono" x-text="`${forwardTestSummary.horizons[hz].win_rate.toFixed(1)}%`"></span>
+                                                    </div>
+                                                    <div class="flex justify-between">
+                                                        <span class="text-[9px] text-slate-500 font-bold">차단 품질</span>
+                                                        <span class="font-black"
+                                                              :class="{
+                                                                  'text-green-600': forwardTestSummary.horizons[hz].blocked_quality.quality_grade === '우수',
+                                                                  'text-blue-600': forwardTestSummary.horizons[hz].blocked_quality.quality_grade === '양호',
+                                                                  'text-red-500': forwardTestSummary.horizons[hz].blocked_quality.quality_grade === '점검 필요',
+                                                                  'text-slate-400': forwardTestSummary.horizons[hz].blocked_quality.quality_grade.includes('부족')
+                                                              }"
+                                                              x-text="forwardTestSummary.horizons[hz].blocked_quality.quality_grade"></span>
+                                                    </div>
+                                                </div>
+                                            </template>
+
+                                            <template x-if="forwardTestSummary.horizons[hz].status !== 'OK'">
+                                                <div class="text-center py-2 text-[9px] font-bold text-slate-400">데이터 부족</div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+
+                                <!-- Overall No-Buy Block Quality Banner -->
+                                <div class="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 bg-white/70 border border-purple-100 rounded px-2.5 py-1.5 text-[10px]">
+                                    <div class="flex items-center gap-1.5 font-bold text-purple-950">
+                                        <span class="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[8px] font-black">종합 차단품질</span>
+                                        <span class="font-black text-[11px]"
+                                              :class="{
+                                                  'text-green-600': forwardTestSummary.blocked_quality.quality_grade === '우수',
+                                                  'text-blue-600': forwardTestSummary.blocked_quality.quality_grade === '양호',
+                                                  'text-red-500': forwardTestSummary.blocked_quality.quality_grade === '점검 필요',
+                                                  'text-slate-400': forwardTestSummary.blocked_quality.quality_grade.includes('부족')
+                                              }"
+                                              x-text="forwardTestSummary.blocked_quality.quality_grade"></span>
+                                        <span class="text-slate-400 font-medium">|</span>
+                                        <span class="text-slate-600 font-medium"
+                                              x-text="`WATCH/AVOID 감지 ${forwardTestSummary.blocked_quality.blocked_count}건 중 하락 방어 ${forwardTestSummary.blocked_quality.good_block_count}건`"></span>
+                                    </div>
+                                    <template x-if="forwardTestSummary.blocked_quality.missed_opportunity_count > 0">
+                                        <div class="text-[9.5px] font-semibold text-amber-800 bg-amber-50 rounded px-2 py-0.5 border border-amber-100/50">
+                                            ⚠️ 기회 비용 상승 종목:
+                                            <span class="font-bold font-mono" x-text="forwardTestSummary.blocked_quality.missed_opportunity_symbols.join(', ')"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
                     </div>
 
                     <!-- AlphaForge Picks Panel (Full-Width Row List) -->
@@ -464,7 +566,7 @@
                                 <h2 class="text-xl font-black">가치투자 퀀트 스캐너</h2>
                                 <p class="text-xs text-gray-400 mt-1">DART 재무제표 + KIS 수급 실시간 분석</p>
                             </div>
-                            <button @click="runScan()" 
+                            <button @click="runScan()"
                                     :disabled="scanning"
                                     class="bg-black text-white px-6 py-2 rounded-xl text-sm font-bold hover:bg-gray-800 disabled:bg-gray-200 transition-all">
                                 <span x-show="!scanning">전 종목 스캔 시작</span>

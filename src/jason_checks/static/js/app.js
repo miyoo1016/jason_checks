@@ -79,6 +79,7 @@ function timaApp() {
         sectorAuditWarnings: [],
         duplicatedSymbols: [],
         suspiciousSectorMembers: [],
+        forwardTestSummary: null,
 
         // Methods
         async init() {
@@ -1145,6 +1146,30 @@ ${baselineSvg}\
                 );
             }
 
+            // ── Forward Test Evaluator v1 ──
+            lines.push('');
+            lines.push('[Forward Test]');
+            const ft = this.forwardTestSummary;
+            if (!ft || ft.status === 'DATA_INSUFFICIENT') {
+                lines.push('데이터가 부족하여 성과 분석을 표시할 수 없습니다.');
+            } else {
+                for (const hz of ['1d', '3d', '5d', '10d']) {
+                    const hData = ft.horizons && ft.horizons[hz];
+                    if (!hData || hData.status === 'DATA_INSUFFICIENT') {
+                        lines.push(`${hz}: 성과 평균 0.00% / 승률 0.0% / 차단 아직 데이터 부족 (차단 0 / Good 0 / Missed 0)`);
+                    } else {
+                        const bq = hData.blocked_quality || {};
+                        const blocked = bq.blocked_count || 0;
+                        const good = bq.good_block_count || 0;
+                        const missed = bq.missed_opportunity_count || 0;
+                        const grade = bq.quality_grade || '아직 데이터 부족';
+                        const avg = hData.avg_return !== undefined ? hData.avg_return.toFixed(2) : '0.00';
+                        const win = hData.win_rate !== undefined ? hData.win_rate.toFixed(1) : '0.0';
+                        lines.push(`${hz}: 성과 평균 ${avg >= 0 ? '+' : ''}${avg}% / 승률 ${win}% / 차단 ${grade} (차단 ${blocked} / Good ${good} / Missed ${missed})`);
+                    }
+                }
+            }
+
             return lines.join('\n');
         },
 
@@ -1419,6 +1444,7 @@ ${baselineSvg}\
                 if (data.sector_audit_warnings) this.sectorAuditWarnings = data.sector_audit_warnings;
                 if (data.duplicated_symbols) this.duplicatedSymbols = data.duplicated_symbols;
                 if (data.suspicious_sector_members) this.suspiciousSectorMembers = data.suspicious_sector_members;
+                if (data.forward_test_summary) this.forwardTestSummary = data.forward_test_summary;
             } catch (error) {
                 console.error('Failed to load themes:', error);
             }
