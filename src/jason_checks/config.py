@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     kis_app_secret: str = ""
     kis_account_no: str = ""
     dart_api_key: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

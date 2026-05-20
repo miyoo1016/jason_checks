@@ -42,9 +42,10 @@ from jason_checks.alphaforge_candidates import (
     flatten_alphaforge_rows,
     load_alphaforge_candidates_with_meta,
 )
-from jason_checks.signal_journal import save_signal_journal
+from jason_checks.signal_journal import save_signal_journal, build_signal_rows
 from jason_checks.decision_engine import run_decision_engine
 from jason_checks.signal_journal import get_session_status
+from jason_checks.telegram_notifier import maybe_send_event, telegram_enabled
 
 # Initialize logging
 setup_logging()
@@ -378,6 +379,36 @@ async def _signal_journal_loop(app):
         await asyncio.sleep(300)
 
 
+async def _telegram_alert_loop(app):
+    """Dry-run Telegram alert scan for AlphaForge candidates."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            rows = build_signal_rows(_theme_data_for_subscription(app), market=CURRENT_MARKET)
+            results = []
+            for row in rows:
+                try:
+                    results.append(await maybe_send_event(row, dry_run=True))
+                except Exception as e:
+                    logger.warning("telegram_dry_run_row_failed", error=str(e))
+            would_send_count = sum(1 for item in results if item.get("would_send_telegram"))
+            session_blocked_count = sum(
+                1 for item in results
+                if "session_allows_alert" in item.get("blocked_by", [])
+            )
+            logger.info(
+                "telegram_alert_loop_dry_run",
+                rows=len(rows),
+                credentials_present=telegram_enabled(),
+                would_send_telegram=would_send_count,
+                session_blocked=session_blocked_count,
+                dry_run=True,
+            )
+        except Exception as e:
+            logger.warning("telegram_loop_error", error=str(e))
+        await asyncio.sleep(30)
+
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI app."""
     app = FastAPI(
@@ -483,6 +514,7 @@ def create_app() -> FastAPI:
         asyncio.create_task(_theme_quote_polling_loop(app))
         asyncio.create_task(run_selective_supply_poller(app, app_state))
         asyncio.create_task(_signal_journal_loop(app))
+        asyncio.create_task(_telegram_alert_loop(app))
 
     @app.on_event("shutdown")
     async def shutdown():
