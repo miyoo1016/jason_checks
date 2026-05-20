@@ -16,7 +16,7 @@ ACCESS_TOKEN_CACHE = Path("data/.access_token_cache.json")
 
 # In-memory cache for top movers (2-second TTL to respect KIS rate limits)
 _top_movers_cache = {"data": [], "fetched_at": None}
-_CACHE_TTL_SECONDS = 2
+_CACHE_TTL_SECONDS = 30
 
 
 def _kis_int(value) -> int:
@@ -152,7 +152,6 @@ async def fetch_top_movers_cached(**kwargs) -> list[dict]:
     if (
         _top_movers_cache["fetched_at"]
         and (now - _top_movers_cache["fetched_at"]).total_seconds() < _CACHE_TTL_SECONDS
-        and _top_movers_cache["data"]
     ):
         return _top_movers_cache["data"]
 

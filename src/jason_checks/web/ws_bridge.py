@@ -65,9 +65,10 @@ class WSBridge:
         from jason_checks.kis_rest import fetch_current_price, fetch_investor_data
         while self.running:
             try:
-                # SAFE ACCESS: Get active codes from the shared app_state
-                active_codes = list(app_state.stocks.keys())
-                
+                # Keep the hard fallback narrow so the full 96-symbol quote
+                # scanner can use the REST quota without being starved.
+                active_codes = list(dict.fromkeys(self.target_codes or []))[:12]
+
                 if not active_codes:
                     active_codes = ["005930", "000660", "042700", "403870"]
 
@@ -154,14 +155,12 @@ class WSBridge:
             "investor_individual": stock.investor_individual,
         }
         asyncio.create_task(self._broadcast(json.dumps(msg)))
-        # LOG AND PRINT FOR FINAL VERIFICATION
-        print(f"DEBUG_BROADCAST: {tick.code} P:{tick.price} S:{tick.strength} F:{msg['investor_foreigner']}")
-        logger.info("broadcast_tick", code=tick.code, price=tick.price, strength=tick.strength, foreign=msg["investor_foreigner"])
+        logger.debug("broadcast_tick", code=tick.code, price=tick.price, strength=tick.strength, foreign=msg["investor_foreigner"])
 
     async def _broadcast(self, message: str) -> None:
         """Broadcast message to all connected clients."""
         disconnected = set()
-        for client in _clients:
+        for client in list(_clients):
             try:
                 await client.send_text(message)
             except Exception as e:

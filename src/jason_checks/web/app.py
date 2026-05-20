@@ -133,12 +133,39 @@ def _apply_price_snapshot(code: str, price_data: dict | None) -> bool:
     return True
 
 
-async def _fetch_price_snapshot(code: str) -> dict | None:
+def _run_dashboard_decision_engine_cached(
+    app,
+    *,
+    alphaforge_picks: list[dict],
+    themes: dict,
+    indices: dict,
+    session: str,
+    ttl_sec: float = 10.0,
+) -> dict:
+    now_ts = datetime.now().timestamp()
+    cached_at = float(getattr(app, "_decision_summary_cached_at", 0) or 0)
+    cached = getattr(app, "latest_decision_summary", None)
+    if cached and now_ts - cached_at < ttl_sec:
+        return cached
+
+    summary = run_decision_engine(
+        alphaforge_picks=alphaforge_picks,
+        themes=themes,
+        indices=indices,
+        session=session,
+    )
+    app.latest_decision_summary = summary
+    app._decision_summary_cached_at = now_ts
+    return summary
+
+
+async def _fetch_price_snapshot(code: str, timeout_sec: float | None = None) -> dict | None:
     async with _PRICE_FETCH_LOCK:
-        if CURRENT_MARKET == "KR":
-            data = await fetch_current_price(code)
+        coro = fetch_current_price(code) if CURRENT_MARKET == "KR" else fetch_overseas_price(code)
+        if timeout_sec:
+            data = await asyncio.wait_for(coro, timeout=timeout_sec)
         else:
-            data = await fetch_overseas_price(code)
+            data = await coro
         await asyncio.sleep(0.25)
         return data
 
@@ -155,11 +182,14 @@ async def _theme_quote_polling_loop(app):
 
             hydrated = 0
             missing_codes: list[str] = []
+            last_exception = ""
+            stuck_warned = False
             symbol_names = _watch_symbol_names(app)
             started_at = datetime.now()
             estimated_sec = max(30, min(90, round(len(symbols) * 0.7)))
             app.quote_polling_status = {
                 "total": len(symbols),
+                "checked": 0,
                 "success": 0,
                 "missing": 0,
                 "in_progress": True,
@@ -169,19 +199,42 @@ async def _theme_quote_polling_loop(app):
                 "duration_sec": getattr(app, "last_quote_polling_duration_sec", 0),
                 "estimated_sec": estimated_sec,
                 "missing_symbols": [],
+                "last_exception": "",
             }
             logger.info("theme_quote_polling_start", count=len(symbols), market=CURRENT_MARKET)
             for code in symbols:
-                data = await _fetch_price_snapshot(code)
-                if _apply_price_snapshot(code, data):
-                    hydrated += 1
-                else:
+                try:
+                    data = await _fetch_price_snapshot(code, timeout_sec=2.0)
+                    if _apply_price_snapshot(code, data):
+                        hydrated += 1
+                    else:
+                        missing_codes.append(code)
+                except Exception as e:
+                    last_exception = f"{code}: {type(e).__name__}: {e}"
                     missing_codes.append(code)
+                    logger.warning("theme_quote_symbol_error", code=code, error=str(e), error_type=type(e).__name__)
+                duration_live = round((datetime.now() - started_at).total_seconds(), 1)
                 app.quote_polling_status.update({
+                    "checked": hydrated + len(missing_codes),
                     "success": hydrated,
                     "missing": len(missing_codes),
                     "updated_at": datetime.now().isoformat(),
+                    "duration_sec": duration_live,
+                    "last_exception": last_exception,
                 })
+                if not stuck_warned and duration_live >= 60 and hydrated < 80:
+                    stuck_warned = True
+                    logger.warning(
+                        "theme_quote_polling_slow",
+                        elapsed_sec=duration_live,
+                        quote_success=hydrated,
+                        price_missing=len(missing_codes),
+                        missing_symbols=[
+                            {"code": c, "name": symbol_names.get(c, "")}
+                            for c in missing_codes[:20]
+                        ],
+                        last_exception=last_exception,
+                    )
             missing_preview = [
                 {"code": code, "name": symbol_names.get(code, "")}
                 for code in missing_codes[:20]
@@ -194,7 +247,17 @@ async def _theme_quote_polling_loop(app):
                 "duration_sec": duration_sec,
                 "estimated_sec": duration_sec,
                 "missing_symbols": missing_preview,
+                "last_exception": last_exception,
             })
+            if hydrated < 80:
+                logger.warning(
+                    "theme_quote_polling_low_success",
+                    elapsed_sec=duration_sec,
+                    quote_success=hydrated,
+                    price_missing=len(missing_codes),
+                    missing_symbols=missing_preview,
+                    last_exception=last_exception,
+                )
             logger.info(
                 "theme_quote_polling_done",
                 watch_symbols=len(symbols),
@@ -204,6 +267,13 @@ async def _theme_quote_polling_loop(app):
             )
         except Exception as e:
             logger.warning("theme_quote_polling_error", error=str(e))
+            status = dict(getattr(app, "quote_polling_status", {}) or {})
+            status.update({
+                "in_progress": False,
+                "last_exception": str(e),
+                "updated_at": datetime.now().isoformat(),
+            })
+            app.quote_polling_status = status
         await asyncio.sleep(60)
 
 
@@ -242,7 +312,10 @@ async def _unified_polling_loop(app):
             get_bridge().target_codes = list(active_codes)
             asyncio.create_task(get_ws().resubscribe(active_codes))
 
-            if CURRENT_MARKET == "KR":
+            quote_status = getattr(app, "quote_polling_status", {}) or {}
+            quote_busy = bool(quote_status.get("in_progress")) and int(quote_status.get("success") or 0) < 80
+
+            if CURRENT_MARKET == "KR" and not quote_busy:
                 codes_set = set()
                 for tc in sub_active_themes:
                     for s in sub_theme_data.get(tc, {}).get("stocks", []):
@@ -271,6 +344,12 @@ async def _unified_polling_loop(app):
                     except Exception as e:
                         logger.warning("stock_poll_error", code=code, error=str(e))
                         await asyncio.sleep(1.5)
+            elif CURRENT_MARKET == "KR":
+                logger.info(
+                    "stock_poll_deferred_for_full_quote_scan",
+                    quote_success=int(quote_status.get("success") or 0),
+                    quote_total=int(quote_status.get("total") or 0),
+                )
             else:
                 # US Market
                 codes = []
@@ -464,9 +543,12 @@ def create_app() -> FastAPI:
     @app.get("/api/themes")
     async def get_themes(sort: str = "default", pinned: str = ""):
         quote_status = getattr(app, "quote_polling_status", {})
-        supply_reason = ""
-        if not os.getenv("KRX_ID") or not os.getenv("KRX_PW"):
-            supply_reason = "KRX 로그인 정보 없음"
+        supply_polling_status = getattr(app, "supply_polling_status", {}) or {}
+        supply_reason = (
+            f"KIS 선택수급: 전일수급 {int(supply_polling_status.get('ok') or 0)}/"
+            f"{int(supply_polling_status.get('target_total') or 0)} · "
+            "전체 섹터 수급: 미조회 · KRX 전체수급: 미사용"
+        )
         if not app.theme_data:
             return {
                 "themes": {},
@@ -558,6 +640,8 @@ def create_app() -> FastAPI:
                 "display_name": theme_config.get("display_name", theme_code),
                 "strength": strength,
                 "avg_change_pct": avg_change_pct,
+                "price_count": sum(1 for stock in leader_list if float(stock.get("price") or 0) > 0),
+                "leader_count": len(leader_list),
                 "leaders": leader_list,
             }
 
@@ -650,6 +734,7 @@ def create_app() -> FastAPI:
         display_quote_status = dict(quote_status or {})
         display_quote_status.update({
             "total": theme_row_total,
+            "checked": theme_row_total,
             "success": theme_row_price_count,
             "missing": max(theme_row_total - theme_row_price_count, 0),
             "watch_symbols": len(watch_symbols),
@@ -682,13 +767,13 @@ def create_app() -> FastAPI:
             for code, idx in app_state.indices.items()
         }
         session_now = get_session_status(market=CURRENT_MARKET)
-        decision_summary = run_decision_engine(
+        decision_summary = _run_dashboard_decision_engine_cached(
+            app,
             alphaforge_picks=alphaforge_picks,
             themes=themes_result,
             indices=indices_snapshot,
             session=session_now,
         )
-        app.latest_decision_summary = decision_summary
         # Enrich alphaforge_picks with decision fields
         decision_by_symbol = {r["symbol"]: r for r in decision_summary["results"]}
         for pick in alphaforge_picks:
@@ -847,6 +932,10 @@ def create_app() -> FastAPI:
         """Get top movers / high volume stocks."""
         from jason_checks.kis_rest import fetch_top_movers_cached
 
+        quote_status = getattr(app, "quote_polling_status", {}) or {}
+        if quote_status.get("in_progress") and int(quote_status.get("success") or 0) < 80:
+            return {"surges": getattr(app, "surge_data", []), "market": CURRENT_MARKET, "deferred": True}
+
         # Mapping frontend sort to KIS sort
         # 0=상승률, 1=하락률
         kis_sort = "0" if sort == "change_pct" else "0" # Defaulting to volume/change for now
@@ -858,6 +947,8 @@ def create_app() -> FastAPI:
             from jason_checks.kis_rest import fetch_us_top_movers
             data = await fetch_us_top_movers(limit=limit)
 
+        if data:
+            app.surge_data = data
         return {"surges": data, "market": CURRENT_MARKET}
 
     @app.get("/api/scan")

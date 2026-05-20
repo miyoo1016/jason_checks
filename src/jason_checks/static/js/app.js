@@ -124,11 +124,11 @@ function timaApp() {
             this.updateSessionType();
             setInterval(() => this.updateSessionType(), 30000);
 
-            // Refresh data every 500ms
+            // Refresh dashboard data at a steady cadence without starving REST polling.
             setInterval(() => {
                 this.loadThemes();
                 this.loadSurges();
-            }, 500);
+            }, 2000);
             // Indices refresh every 3s (backend polls every 5s)
             setInterval(() => this.loadIndices(), 3000);
             // US Portfolio Watch refresh every 5s when market === 'US'
@@ -355,8 +355,23 @@ function timaApp() {
         },
 
         supplyBadge(stock) {
-            const status = stock?.supply_status || 'DATA_NA';
-            return status === 'OK' ? '수급 OK' : `수급 ${status}`;
+            const status = stock?.supply_status || stock?.de_supply_status || 'DATA_NA';
+            const recency = stock?.supply_recency || stock?.de_supply_recency || 'UNKNOWN';
+            const source = stock?.supply_source || stock?.de_supply_source || '';
+
+            if (status === 'OK') {
+                if (recency === 'TODAY') return '당일수급';
+                if (recency === 'PREV_DAY') return '전일수급';
+                return '수급 확인';
+            }
+            if (status === 'ERROR') return '수급 오류';
+            if (status === 'RATE_LIMIT') return '수급 제한';
+
+            if (status === 'DATA_NA') {
+                if (source === 'KIS') return '수급 미확인';
+                return '수급 미조회';
+            }
+            return '수급 미확인';
         },
 
         formatClock(value) {
@@ -382,6 +397,12 @@ function timaApp() {
             return seconds > 0 ? `${label}: 약 ${Math.round(seconds)}초` : `${label}: 약 30~90초`;
         },
 
+        themeMetricText(themeData) {
+            const priceCount = Number(themeData?.price_count) || 0;
+            if (priceCount < 2) return '거래활성 계산중 · 방향 계산중';
+            return `거래활성 ${this.fmtThemeStrength(themeData.strength)} · 방향 ${this.fmtThemeDirection(themeData.avg_change_pct)}`;
+        },
+
         formatSupplyFlow(stock, key) {
             const status = stock?.supply_status;
             const deStatus = stock?.de_supply_status;
@@ -405,6 +426,8 @@ function timaApp() {
         supplyStatusText(stock) {
             const status = stock?.supply_status || stock?.de_supply_status || 'DATA_NA';
             const recency = stock?.supply_recency || stock?.de_supply_recency || 'UNKNOWN';
+            const source = stock?.supply_source || stock?.de_supply_source || '';
+
             if (status === 'OK') {
                 if (recency === 'TODAY') return '당일수급';
                 if (recency === 'PREV_DAY') return '전일수급';
@@ -412,6 +435,11 @@ function timaApp() {
             }
             if (status === 'RATE_LIMIT') return '수급 제한';
             if (status === 'ERROR') return '수급 오류';
+
+            if (status === 'DATA_NA') {
+                if (source === 'KIS') return '수급 미확인';
+                return '수급 미조회';
+            }
             return '수급 미확인';
         },
 
@@ -1043,7 +1071,11 @@ ${baselineSvg}\
             const alphaByCode = new Map(this.alphaForgePicks().map(s => [s.code, s]));
             const rows = Object.values(this.stocks || []).map(stock => {
                 const alpha = alphaByCode.get(stock.code) || {};
-                const merged = { ...alpha, ...stock, name: alpha.name || stock.name || stock.code };
+                const merged = {
+                    ...alpha,
+                    ...stock,
+                    name: alpha.name || this.findStockName(stock.code) || stock.name || stock.code,
+                };
                 return {
                     ...merged,
                     horizon_label: this.liveMomentumLabel(merged),
@@ -1056,6 +1088,26 @@ ${baselineSvg}\
                 return bv - av;
             });
             return rows.slice(0, 8);
+        },
+
+        findStockName(code) {
+            if (!code) return '';
+            for (const theme of Object.values(this.themes || {})) {
+                for (const stock of theme.leaders || []) {
+                    if (stock.code === code && stock.name && stock.name !== code) return stock.name;
+                }
+            }
+            for (const stock of this.alphaforgePicksData || []) {
+                if (stock.code === code && stock.name && stock.name !== code) return stock.name;
+            }
+            return '';
+        },
+
+        momentumDisplayName(stock) {
+            const code = stock?.code || '';
+            const name = stock?.name || '';
+            if (name && name !== code) return `${name} (${code})`;
+            return code;
         },
 
         liveMomentumLabel(stock) {

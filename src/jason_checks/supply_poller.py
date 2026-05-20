@@ -168,6 +168,11 @@ async def run_selective_supply_poller(app: Any, app_state: Any) -> None:
                 await asyncio.sleep(30)
                 continue
 
+            quote_status = getattr(app, "quote_polling_status", {}) or {}
+            if quote_status.get("in_progress") and int(quote_status.get("success") or 0) < 80:
+                await asyncio.sleep(10)
+                continue
+
             called = False
             for target in targets:
                 code = target["code"]

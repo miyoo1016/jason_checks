@@ -133,7 +133,7 @@
                             <div class="text-gray-500 normal-case" x-text="`마지막 갱신: ${formatClock(quotePolling.updated_at || quotePolling.completed_at)}`"></div>
                             <div class="text-gray-500 normal-case" x-text="quoteEtaText()"></div>
                             <div x-show="supplyDataReason" class="text-gray-400 normal-case"
-                                 x-text="`수급 DATA_NA: ${supplyDataReason}`"></div>
+                                 x-text="supplyDataReason"></div>
                             <div x-show="alphaforgeCandidatesLoaded > 0" class="text-blue-600 normal-case"
                                  x-text="`AlphaForge 후보 로드: ${alphaforgeCandidatesLoaded}개 / ${alphaforgeCandidatesGeneratedAt || '-'}`"></div>
                         </div>
@@ -454,7 +454,7 @@
                                               x-text="`${(themeData.avg_change_pct || 0) >= 0 ? '+' : ''}${(themeData.avg_change_pct || 0).toFixed(2)}%`">
                                         </span>
                                         <span class="mono text-[8px] font-black text-gray-500"
-                                              x-text="`거래활성 ${fmtThemeStrength(themeData.strength)} · 방향 ${fmtThemeDirection(themeData.avg_change_pct)}`"></span>
+                                              x-text="themeMetricText(themeData)"></span>
                                         <button @click="togglePin(themeName)" class="star-icon text-sm leading-none flex-shrink-0"
                                                 :class="{ 'pinned': isPinned(themeName) }">
                                             <span x-text="isPinned(themeName) ? '★' : '☆'"></span>
@@ -511,8 +511,8 @@
                                         <div class="dual-horizon-item">
                                             <div class="flex justify-between gap-2">
                                                 <div class="min-w-0">
-                                                    <div class="text-xs font-bold truncate" x-text="stock.name || stock.code"></div>
-                                                    <div class="text-[9px] text-gray-400 mono" x-text="stock.code"></div>
+                                                    <div class="text-xs font-bold truncate" x-text="momentumDisplayName(stock)"></div>
+                                                    <div x-show="stock.name && stock.name !== stock.code" class="text-[9px] text-gray-400 mono" x-text="stock.code"></div>
                                                 </div>
                                                 <span class="dual-horizon-label" x-text="stock.horizon_label"></span>
                                             </div>
