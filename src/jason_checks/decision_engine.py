@@ -143,13 +143,15 @@ def _data_quality(stock: dict[str, Any]) -> dict[str, Any]:
     trading_value = int(_to_float(stock.get("cumulative_trading_value")))
     strength = _to_float(stock.get("strength"))
     supply_status = str(stock.get("supply_status") or "DATA_NA")
+    supply_recency = str(stock.get("supply_recency") or "UNKNOWN")
     supply_timestamp = str(stock.get("supply_updated_at") or "")
+    supply_age = _quote_age_sec({"updated_at": supply_timestamp}) if supply_timestamp else None
     quote_age = _quote_age_sec(stock)
 
     has_price = price > 0
     has_trading_value = trading_value > 0
     has_strength = strength > 0
-    has_supply = supply_status != "DATA_NA" and bool(supply_timestamp)
+    has_supply = supply_status == "OK" and supply_recency in ("TODAY", "PREV_DAY")
     quote_stale = quote_age is not None and quote_age > 180
     flags: list[str] = []
 
@@ -161,6 +163,10 @@ def _data_quality(stock: dict[str, Any]) -> dict[str, Any]:
         flags.append("STRENGTH_MISSING")
     if not has_supply:
         flags.append("SUPPLY_DATA_NA")
+    if supply_status == "RATE_LIMIT":
+        flags.append("SUPPLY_RATE_LIMIT")
+    if supply_age is not None and supply_age > 30 * 60:
+        flags.append("SUPPLY_STALE")
     if quote_age is None:
         flags.append("QUOTE_TIMESTAMP_MISSING")
     elif quote_stale:
@@ -170,13 +176,16 @@ def _data_quality(stock: dict[str, Any]) -> dict[str, Any]:
         confidence = "LOW"
     elif has_price and has_trading_value:
         confidence = "MID"
-        if has_strength and has_supply and not quote_stale:
+        if has_strength and has_supply and supply_recency == "TODAY" and not quote_stale:
             confidence = "HIGH"
     else:
         confidence = "LOW"
 
     # 수급 미확인은 절대 HIGH가 되지 않게 한다.
     if not has_supply and confidence == "HIGH":
+        confidence = "MID"
+    # 전영업일 수급은 HIGH가 되지 않게 한다.
+    if supply_recency == "PREV_DAY" and confidence == "HIGH":
         confidence = "MID"
     if quote_stale and confidence == "HIGH":
         confidence = "MID"
@@ -189,7 +198,11 @@ def _data_quality(stock: dict[str, Any]) -> dict[str, Any]:
         "has_trading_value": has_trading_value,
         "has_strength": has_strength,
         "has_supply": has_supply,
+        "supply_status": supply_status,
+        "supply_recency": supply_recency,
+        "supply_date": str(stock.get("supply_date") or ""),
         "supply_timestamp": supply_timestamp,
+        "supply_age_sec": supply_age,
     }
 
 
@@ -206,6 +219,7 @@ def _base_reason_codes(
     market_gate: dict[str, Any],
     sector_gate: dict[str, Any],
     supply_status: str,
+    stock: dict[str, Any],
 ) -> list[str]:
     codes: list[str] = []
     gate_level = market_gate.get("market_gate_level") or market_gate.get("level")
@@ -223,8 +237,32 @@ def _base_reason_codes(
         codes.append("BELOW_BOX")
     if not sector_gate.get("confirmed", True):
         codes.append("SECTOR_WEAK")
-    if supply_status == "DATA_NA":
+    supply_age = _quote_age_sec({"updated_at": stock.get("supply_updated_at")}) if stock.get("supply_updated_at") else None
+    foreign_flow = int(_to_float(stock.get("foreign_flow")))
+    institution_flow = int(_to_float(stock.get("institution_flow")))
+    individual_flow = int(_to_float(stock.get("individual_flow")))
+
+    supply_recency = str(stock.get("supply_recency") or "UNKNOWN")
+    if supply_recency == "TODAY":
+        codes.append("SUPPLY_TODAY")
+    elif supply_recency == "PREV_DAY":
+        codes.append("SUPPLY_PREV_DAY")
+
+    if supply_status == "RATE_LIMIT":
+        codes.append("SUPPLY_RATE_LIMIT")
+    elif supply_status == "DATA_NA" or supply_recency == "UNKNOWN":
         codes.append("SUPPLY_DATA_NA")
+    elif supply_age is not None and supply_age > 30 * 60:
+        codes.append("SUPPLY_STALE")
+
+    if supply_status == "OK" and supply_recency in ("TODAY", "PREV_DAY"):
+        if foreign_flow > 0 and institution_flow > 0:
+            codes.append("SUPPLY_POSITIVE")
+        elif foreign_flow < 0 and institution_flow < 0:
+            codes.append("SUPPLY_NEGATIVE")
+        elif any(v != 0 for v in (foreign_flow, institution_flow, individual_flow)):
+            codes.append("SUPPLY_MIXED")
+
     if 0 < strength < 90:
         codes.append("STRENGTH_WEAK")
     return list(dict.fromkeys(codes))
@@ -415,7 +453,7 @@ def evaluate_stock(
     setup = _setup_profile(stock, data_conf, sector_gate)
     reason_codes = _base_reason_codes(
         price, strength, alert_type, vcp_status, box_price,
-        market_gate, sector_gate, supply_status,
+        market_gate, sector_gate, supply_status, stock,
     )
 
     no_buy_reasons: list[str] = []
@@ -494,8 +532,10 @@ def evaluate_stock(
         no_buy_reasons.append(f"거래대금 부족 ({trading_value // 100_000_000}억)")
         confidence_score = max(0, confidence_score - 20)
 
-    if supply_status == "DATA_NA":
+    if not data_quality.get("has_supply"):
         confidence_score = max(0, confidence_score - 10)
+    elif data_quality.get("supply_recency") == "PREV_DAY":
+        confidence_score = min(100, confidence_score + 3)
 
     # ── 데이터 신뢰도 보너스 ─────────────────────────────────────────────────
     if data_conf == "HIGH":
@@ -593,7 +633,7 @@ def evaluate_stock(
         decision = "BUY_NOW"
         max_position_pct = base_pct
         action_reason = action_reason or "모든 조건 충족"
-    elif supply_status == "DATA_NA" or len(no_buy_reasons) <= 1:
+    elif not data_quality.get("has_supply") or len(no_buy_reasons) <= 1:
         decision = "STARTER_POSITION"
         max_position_pct = min(base_pct, 8)
         action_reason = action_reason or "부분 조건 충족"

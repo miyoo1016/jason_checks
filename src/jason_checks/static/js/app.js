@@ -42,6 +42,7 @@ function timaApp() {
         themeSortOrder: [],
         quotePolling: {},
         supplyDataReason: '',
+        supplyPolling: {},
         surges: [],
         surgeSortMode: 'change_pct',
         sessionType: 'closed',  // 'pre' | 'regular' | 'after' | 'closed'
@@ -382,14 +383,88 @@ function timaApp() {
         },
 
         formatSupplyFlow(stock, key) {
-            if (!stock || stock.supply_status !== 'OK') return 'DATA_NA';
+            const status = stock?.supply_status;
+            const deStatus = stock?.de_supply_status;
+            if (!stock || (status !== 'OK' && deStatus !== 'OK')) return '';
             const value = stock[key];
-            if (value === null || value === undefined || value === '') return 'DATA_NA';
-            return this.formatTrend(value);
+            if (value === null || value === undefined || value === '') return '';
+            const num = Number(value);
+            if (!Number.isFinite(num)) return '';
+            // 원(KRW) → 억 단위 표시
+            const eok = num / 100_000_000;
+            const sign = eok >= 0 ? '+' : '';
+            if (Math.abs(eok) >= 1) {
+                return `${sign}${eok.toFixed(0)}억`;
+            } else if (Math.abs(num) > 0) {
+                // 1억 미만이면 만 단위
+                return `${sign}${(num / 10_000).toFixed(0)}만`;
+            }
+            return '0';
+        },
+
+        supplyStatusText(stock) {
+            const status = stock?.supply_status || stock?.de_supply_status || 'DATA_NA';
+            const recency = stock?.supply_recency || stock?.de_supply_recency || 'UNKNOWN';
+            if (status === 'OK') {
+                if (recency === 'TODAY') return '당일수급';
+                if (recency === 'PREV_DAY') return '전일수급';
+                return '수급 확인';
+            }
+            if (status === 'RATE_LIMIT') return '수급 제한';
+            if (status === 'ERROR') return '수급 오류';
+            return '수급 미확인';
+        },
+
+        supplyAgeText(stock) {
+            const status = stock?.supply_status || stock?.de_supply_status;
+            if (status !== 'OK') return '';
+            const recency = stock?.supply_recency || stock?.de_supply_recency || 'UNKNOWN';
+            const supplyDate = stock?.supply_date || stock?.de_supply_date || '';
+            if (recency === 'PREV_DAY') {
+                // 전일 수급이면 날짜 표시 (YYYYMMDD → MM/DD)
+                if (supplyDate && supplyDate.length === 8) {
+                    return `(${supplyDate.slice(4,6)}/${supplyDate.slice(6,8)} 전일)`;
+                }
+                return '(전일)';
+            }
+            // 당일 수급이면 경과 시간 표시
+            const ts = stock?.supply_updated_at;
+            if (!ts) return '';
+            const date = new Date(ts);
+            if (Number.isNaN(date.getTime())) return '';
+            const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+            return minutes > 3 ? `(${minutes}분 전)` : '';
+        },
+
+        supplyPollingText() {
+            const s = this.supplyPolling || {};
+            const target = Number(s.target_total) || 0;
+            const ok = Number(s.ok) || 0;
+            const na = Number(s.data_na) || 0;
+            const limited = Number(s.rate_limit) || 0;
+            const last = s.last_updated_at ? this.formatClock(s.last_updated_at) : '-';
+            // 당일/전일 분리 카운트: alphaForgePicks에서 계산
+            const picks = this.alphaForgePicks ? this.alphaForgePicks() : [];
+            let todayCnt = 0, prevDayCnt = 0;
+            for (const p of picks) {
+                const rec = p.supply_recency || p.de_supply_recency || 'UNKNOWN';
+                const st = p.supply_status || 'DATA_NA';
+                if (st === 'OK' && rec === 'TODAY') todayCnt++;
+                else if (st === 'OK' && rec === 'PREV_DAY') prevDayCnt++;
+            }
+            const parts = [];
+            if (todayCnt > 0) parts.push(`당일수급 ${todayCnt}`);
+            if (prevDayCnt > 0) parts.push(`전일수급 ${prevDayCnt}`);
+            if (na > 0) parts.push(`미확인 ${na}`);
+            if (limited > 0) parts.push(`제한 ${limited}`);
+            const detailStr = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+            return `수급 조회: ${target}종목${detailStr} · 마지막 ${last}`;
         },
 
         supplyFlowClass(stock, key) {
-            if (!stock || stock.supply_status !== 'OK') return 'text-gray-400';
+            const status = stock?.supply_status;
+            const deStatus = stock?.de_supply_status;
+            if (!stock || (status !== 'OK' && deStatus !== 'OK')) return 'text-gray-400';
             const value = Number(stock[key]);
             if (!Number.isFinite(value)) return 'text-gray-400';
             if (value > 0) return 'up';
@@ -1024,6 +1099,7 @@ ${baselineSvg}\
             lines.push(this.deTopReasonCodesText());
             lines.push(this.deDataConfidenceCountsText());
             lines.push(this.deSectorAuditText());
+            lines.push(this.supplyPollingText());
             if (!this.deHasBuySignal()) {
                 const reason = this.decisionSession === 'REGULAR'
                     ? (this.decisionMarketGate?.reason || '조건 미충족')
@@ -1114,10 +1190,13 @@ ${baselineSvg}\
                         `단기 사유 ${this.formatDecisionItems(stock.short_reasons)}`,
                         `중기 사유 ${this.formatDecisionItems(stock.position_reasons)}`,
                         `수급상태 ${stock.supply_status || 'DATA_NA'}`,
+                        `수급구분 ${stock.supply_recency || stock.de_supply_recency || 'UNKNOWN'}`,
+                        `수급날짜 ${stock.supply_date || stock.de_supply_date || '-'}`,
                         `수급시각 ${stock.supply_updated_at || '-'}`,
-                        `외 ${this.formatSupplyFlow(stock, 'foreign_flow')}`,
-                        `기 ${this.formatSupplyFlow(stock, 'institution_flow')}`,
-                        `개 ${this.formatSupplyFlow(stock, 'individual_flow')}`,
+                        `수급소스 ${stock.supply_source || '-'}`,
+                        `외 ${this.formatSupplyFlow(stock, 'foreign_flow') || '-'}`,
+                        `기 ${this.formatSupplyFlow(stock, 'institution_flow') || '-'}`,
+                        `개 ${this.formatSupplyFlow(stock, 'individual_flow') || '-'}`,
                         `DECISION_ENGINE ${deDecision}`,
                         `confidence ${deConfidence}`,
                         `data_confidence ${deDataConfidence}`,
@@ -1405,6 +1484,7 @@ ${baselineSvg}\
                 this.themeLoadReason = data.theme_load_reason || '';
                 this.quotePolling = data.quote_polling || {};
                 this.supplyDataReason = data.supply_data_reason || '';
+                this.supplyPolling = data.supply_polling || {};
 
                 if (data.themes) {
                     this.themes = data.themes;

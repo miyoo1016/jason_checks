@@ -202,6 +202,8 @@
                                   x-text="deDataConfidenceCountsText()"></span>
                             <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
                                   x-text="deSectorAuditText()"></span>
+                            <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
+                                  x-text="supplyPollingText()"></span>
                         </div>
                     </div>
 
@@ -389,6 +391,23 @@
                                                     <span x-text="stock.de_reason_codes.slice(0, 3).join(', ')"></span>
                                                 </div>
                                             </template>
+                                            <div class="mt-0.5 text-slate-600" style="word-break: keep-all;">
+                                                <span
+                                                    :class="{
+                                                        'bg-blue-100 text-blue-800 px-1 rounded mr-1': (stock.supply_status === 'OK' || stock.de_supply_status === 'OK') && (stock.supply_recency === 'TODAY' || stock.de_supply_recency === 'TODAY'),
+                                                        'bg-slate-100 text-slate-600 px-1 rounded mr-1': (stock.supply_status === 'OK' || stock.de_supply_status === 'OK') && (stock.supply_recency === 'PREV_DAY' || stock.de_supply_recency === 'PREV_DAY'),
+                                                        'bg-gray-100 text-gray-500 px-1 rounded mr-1': stock.supply_status !== 'OK' && stock.de_supply_status !== 'OK'
+                                                    }"
+                                                    x-text="supplyStatusText(stock)"></span>
+                                                <template x-if="stock.supply_status === 'OK' || stock.de_supply_status === 'OK'">
+                                                    <span>
+                                                        외 <span :class="supplyFlowClass(stock, 'foreign_flow')" x-text="formatSupplyFlow(stock, 'foreign_flow')"></span>
+                                                        / 기 <span :class="supplyFlowClass(stock, 'institution_flow')" x-text="formatSupplyFlow(stock, 'institution_flow')"></span>
+                                                        / 개 <span :class="supplyFlowClass(stock, 'individual_flow')" x-text="formatSupplyFlow(stock, 'individual_flow')"></span>
+                                                        <span class="text-slate-400 text-[9px]" x-text="supplyAgeText(stock)"></span>
+                                                    </span>
+                                                </template>
+                                            </div>
                                         </div>
                                         <div>
                                             <template x-if="stock.de_next_session_trigger && stock.de_next_session_trigger !== '-'">

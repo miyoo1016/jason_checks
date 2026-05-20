@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 import httpx
@@ -16,6 +17,23 @@ ACCESS_TOKEN_CACHE = Path("data/.access_token_cache.json")
 # In-memory cache for top movers (2-second TTL to respect KIS rate limits)
 _top_movers_cache = {"data": [], "fetched_at": None}
 _CACHE_TTL_SECONDS = 2
+
+
+def _kis_int(value) -> int:
+    """Parse KIS numeric strings while preserving negative values."""
+    if value is None:
+        return 0
+    text = str(value).strip().replace(",", "")
+    if text == "":
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def _kis_has_value(value) -> bool:
+    return value is not None and str(value).strip() != ""
 
 
 async def get_access_token() -> str:
@@ -526,6 +544,151 @@ async def fetch_stock_investor_trend(code: str) -> dict:
     except Exception as e:
         logger.warning("investor_trend_exception", code=code, error=str(e))
         return {"foreigner": 0, "institution": 0, "individual": 0, "strength": 0.0}
+
+
+async def fetch_stock_supply_snapshot(code: str) -> dict:
+    """Fetch one stock's investor supply snapshot with explicit status fields.
+
+    This uses the existing KIS investor endpoint and is intended for a small,
+    selective target set only. Callers must apply their own TTL/backoff.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        settings = get_settings()
+        app_key, app_secret, _ = get_active_credentials()
+        rest_url, _ = get_urls(settings.kis_mode)
+        token = await get_access_token()
+        url = f"{rest_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": "FHKST01010900",
+            "custtype": "P",
+        }
+        params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code}
+        async with httpx.AsyncClient(verify=False) as client:
+            resp = await client.get(url, headers=headers, params=params, timeout=4.0)
+        if resp.status_code == 429:
+            return {
+                "foreigner_net_buy": 0,
+                "institution_net_buy": 0,
+                "individual_net_buy": 0,
+                "supply_status": "RATE_LIMIT",
+                "supply_timestamp": "",
+                "supply_source": "KIS",
+                "supply_age_sec": None,
+            }
+        if resp.status_code != 200:
+            return {
+                "foreigner_net_buy": 0,
+                "institution_net_buy": 0,
+                "individual_net_buy": 0,
+                "supply_status": "ERROR",
+                "supply_timestamp": "",
+                "supply_source": "KIS",
+                "supply_age_sec": None,
+            }
+        payload = resp.json()
+        if payload.get("rt_cd") != "0":
+            msg = str(payload.get("msg1", ""))
+            status = "RATE_LIMIT" if "EGW00201" in msg or "초당" in msg or "rate" in msg.lower() else "DATA_NA"
+            return {
+                "foreigner_net_buy": 0,
+                "institution_net_buy": 0,
+                "individual_net_buy": 0,
+                "supply_status": status,
+                "supply_timestamp": "",
+                "supply_source": "KIS",
+                "supply_age_sec": None,
+            }
+        output = payload.get("output", [])
+        if not output:
+            return {
+                "foreigner_net_buy": 0,
+                "institution_net_buy": 0,
+                "individual_net_buy": 0,
+                "supply_status": "DATA_NA",
+                "supply_recency": "UNKNOWN",
+                "supply_date": "",
+                "supply_timestamp": "",
+                "supply_source": "KIS",
+                "supply_age_sec": None,
+            }
+
+        latest = None
+        is_today = False
+        rows = output if isinstance(output, list) else [output]
+
+        for idx, row in enumerate(rows):
+            fields = [
+                "frgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn", "prsn_ntby_tr_pbmn",
+                "frgn_ntby_qty", "orgn_ntby_qty", "prsn_ntby_qty"
+            ]
+            if any(_kis_has_value(row.get(f)) for f in fields):
+                latest = row
+                is_today = (idx == 0)
+                break
+
+        if latest is None:
+            return {
+                "foreigner_net_buy": 0,
+                "institution_net_buy": 0,
+                "individual_net_buy": 0,
+                "supply_status": "DATA_NA",
+                "supply_recency": "UNKNOWN",
+                "supply_date": "",
+                "supply_timestamp": "",
+                "supply_source": "KIS",
+                "supply_age_sec": None,
+            }
+
+        close_price = _kis_int(latest.get("stck_clpr")) or _kis_int(latest.get("stck_prpr")) or 1
+
+        def net_amount(amount_key: str, qty_key: str) -> int:
+            if _kis_has_value(latest.get(amount_key)):
+                return _kis_int(latest.get(amount_key)) * 1_000_000
+            if _kis_has_value(latest.get(qty_key)):
+                return _kis_int(latest.get(qty_key)) * close_price
+            return 0
+
+        foreigner = net_amount("frgn_ntby_tr_pbmn", "frgn_ntby_qty")
+        institution = net_amount("orgn_ntby_tr_pbmn", "orgn_ntby_qty")
+        individual = net_amount("prsn_ntby_tr_pbmn", "prsn_ntby_qty")
+
+        supply_recency = "TODAY" if is_today else "PREV_DAY"
+        supply_date = latest.get("stck_bsop_date", "")
+
+        return {
+            "foreigner_net_buy": foreigner,
+            "institution_net_buy": institution,
+            "individual_net_buy": individual,
+            "supply_status": "OK",
+            "supply_recency": supply_recency,
+            "supply_date": supply_date,
+            "supply_timestamp": now,
+            "supply_source": "KIS",
+            "supply_age_sec": 0,
+        }
+    except Exception as e:
+        msg = str(e)
+        tb = traceback.format_exc(limit=3)
+        status = "RATE_LIMIT" if "429" in msg or "EGW00201" in msg or "rate" in msg.lower() else "ERROR"
+        logger.warning("supply_snapshot_failed", code=code, status=status, error=msg, traceback=tb)
+        return {
+            "foreigner_net_buy": 0,
+            "institution_net_buy": 0,
+            "individual_net_buy": 0,
+            "supply_status": status,
+            "supply_recency": "UNKNOWN",
+            "supply_date": "",
+            "supply_timestamp": "",
+            "supply_source": "KIS",
+            "supply_age_sec": None,
+            "supply_error": msg,
+            "supply_traceback": tb,
+        }
 
 
 async def fetch_index_investor_trend(index_code: str) -> dict:

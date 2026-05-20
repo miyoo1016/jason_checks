@@ -29,12 +29,12 @@ from jason_checks.theme_ranker import (
 from jason_checks.kis_ws import get_ws
 from jason_checks.kis_rest import (
     fetch_market_indices,
-    fetch_stock_investor_trend,
     fetch_index_investor_trend,
     fetch_current_price,
     fetch_overseas_price,
     KISClient,
 )
+from jason_checks.supply_poller import run_selective_supply_poller
 from jason_checks.scanners.value_scanner import ValueScanner
 from jason_checks.alphaforge_candidates import (
     build_alphaforge_theme,
@@ -214,7 +214,7 @@ async def _unified_polling_loop(app):
             if not getattr(app, "theme_data", None):
                 await asyncio.sleep(5)
                 continue
-                
+
             # 1. Update Market Indices (KOSPI/KOSDAQ)
             logger.info("polling_indices_start", market=CURRENT_MARKET)
             idx_data = await fetch_market_indices(market=CURRENT_MARKET)
@@ -232,15 +232,16 @@ async def _unified_polling_loop(app):
                     })
                     await asyncio.sleep(1.5)
                 app_state.update_index(code, **update_data)
-            
-            # 2. Update Stock Investor Trends
+
+            # 2. Update WS targets and price snapshots. Broad supply polling is
+            # intentionally disabled; Selective Supply Poller handles max 10.
             active_themes = rank_themes(app.theme_data, top_n=4, pinned=[])
             sub_theme_data = _theme_data_for_subscription(app)
             sub_active_themes = _active_themes_for_subscription(app, active_themes)
             active_codes = get_expanded_subscription_codes(sub_theme_data, sub_active_themes, max_codes=40)
             get_bridge().target_codes = list(active_codes)
             asyncio.create_task(get_ws().resubscribe(active_codes))
-            
+
             if CURRENT_MARKET == "KR":
                 codes_set = set()
                 for tc in sub_active_themes:
@@ -248,26 +249,15 @@ async def _unified_polling_loop(app):
                         codes_set.add(_normalize_symbol(s["code"]))
                 for s in getattr(app, "surge_data", []):
                     if s.get("code"): codes_set.add(_normalize_symbol(s["code"]))
-                
+
                 unique_codes = list(codes_set)[:30]
                 logger.info("polling_stocks_start", count=len(unique_codes))
-                
+
                 for code in unique_codes:
                     try:
-                        tr = await fetch_stock_investor_trend(code)
                         pr = await _fetch_price_snapshot(code)
-                        stock = app_state.stocks.get(code)
-                        
                         update_data = {}
-                        inv_f = tr["foreigner"] if tr["foreigner"] != 0 else (pr.get("foreigner_net_buy", 0) if pr else 0)
-                        if inv_f != 0 or not stock or stock.investor_foreigner == 0:
-                            update_data["investor_foreigner"] = inv_f
-                        if tr["institution"] != 0 or not stock or stock.investor_institution == 0:
-                            update_data["investor_institution"] = tr["institution"]
-                        if tr["individual"] != 0 or not stock or stock.investor_individual == 0:
-                            update_data["investor_individual"] = tr["individual"]
-                            
-                        str_val = tr.get("strength", (pr.get("strength", 0) if pr else 0))
+                        str_val = pr.get("strength", 0) if pr else 0
                         if str_val not in (None, "", 0, 0.0):
                             update_data["execution_strength"] = float(str_val)
                         if pr:
@@ -294,7 +284,7 @@ async def _unified_polling_loop(app):
                             _apply_price_snapshot(code, pr)
                     except: pass
                     await asyncio.sleep(0.5)
-            
+
             logger.info("polling_cycle_done")
         except Exception as e:
             logger.error("unified_loop_error", error=str(e))
@@ -362,6 +352,17 @@ def create_app() -> FastAPI:
                 "estimated_sec": max(30, min(90, round(len(app.watch_symbols) * 0.7))),
                 "missing_symbols": [],
             }
+            app.supply_polling_status = {
+                "target_total": 0,
+                "target_codes": [],
+                "checked": 0,
+                "ok": 0,
+                "data_na": 0,
+                "rate_limit": 0,
+                "error": 0,
+                "last_updated_at": "",
+                "paused_until": "",
+            }
             app.code_theme_map = build_code_to_theme_map(app.theme_data)
             logger.info(
                 "market_switched",
@@ -393,7 +394,7 @@ def create_app() -> FastAPI:
         if not hasattr(app, "theme_data"):
             logger.error("startup_failed_no_theme_data")
             return
-            
+
         initial_themes = list(app.theme_data.keys())[:4]
         sub_theme_data = _theme_data_for_subscription(app)
         sub_initial_themes = _active_themes_for_subscription(app, initial_themes)
@@ -401,6 +402,7 @@ def create_app() -> FastAPI:
         await start_bridge(codes_to_sub)
         asyncio.create_task(_unified_polling_loop(app))
         asyncio.create_task(_theme_quote_polling_loop(app))
+        asyncio.create_task(run_selective_supply_poller(app, app_state))
         asyncio.create_task(_signal_journal_loop(app))
 
     @app.on_event("shutdown")
@@ -418,33 +420,33 @@ def create_app() -> FastAPI:
         market = payload.get("market")
         if market not in ["KR", "US"]:
             return JSONResponse({"error": "Invalid market"}, status_code=400)
-            
+
         logger.info("request_market_switch", target=market)
         reload_market_themes(market)
-        
+
         # Immediate resubscribe
         active_themes = list(app.theme_data.keys())[:4]
         sub_theme_data = _theme_data_for_subscription(app)
         sub_active_themes = _active_themes_for_subscription(app, active_themes)
         new_codes = get_expanded_subscription_codes(sub_theme_data, sub_active_themes, max_codes=40)
-        
+
         # Clear old data to avoid confusion
         app_state.stocks.clear()
         app_state.indices.clear()
-        
+
         # Stop and restart bridge with new codes
         bridge = get_bridge()
         await bridge.stop()
         await start_bridge(new_codes)
-        
+
         return {"status": "ok", "market": market, "codes": len(new_codes)}
-        
+
         # Tell WebSocket to flush and re-sub
         ws = get_ws()
         if ws.connected:
             await ws.flush_all(list(ws.subscribed_codes))
             await ws.subscribe(new_codes)
-            
+
         return {"status": "ok", "market": market, "subscribed": len(new_codes)}
 
     @app.get("/api/state")
@@ -476,10 +478,11 @@ def create_app() -> FastAPI:
                 "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
                 "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
                 "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
-                "alphaforge_picks": [],
-                "quote_polling": quote_status,
-                "supply_data_reason": supply_reason,
-            }
+            "alphaforge_picks": [],
+            "quote_polling": quote_status,
+            "supply_data_reason": supply_reason,
+            "supply_polling": getattr(app, "supply_polling_status", {}),
+        }
         pinned_list = [p for p in pinned.split(",") if p.strip()]
         if sort == "default":
             active_themes = list(app.theme_data.keys())
@@ -488,7 +491,7 @@ def create_app() -> FastAPI:
             ]
         else:
             active_themes = rank_themes(app.theme_data, top_n=len(app.theme_data), pinned=pinned_list)
-        
+
         stock_ticks = {}
         for code, stock in app_state.stocks.items():
             norm_code = _normalize_symbol(code)
@@ -506,6 +509,10 @@ def create_app() -> FastAPI:
                 "individual_flow": stock.individual_flow,
                 "supply_status": stock.supply_status,
                 "supply_updated_at": stock.supply_updated_at,
+                "supply_source": stock.supply_source,
+                "supply_recency": stock.supply_recency,
+                "supply_date": stock.supply_date,
+                "supply_error": stock.supply_error,
                 "updated_at": stock.last_tick_ts.isoformat(),
             }
 
@@ -538,6 +545,10 @@ def create_app() -> FastAPI:
                     "individual_flow": None,
                     "supply_status": "DATA_NA",
                     "supply_updated_at": "",
+                    "supply_source": "",
+                    "supply_recency": "UNKNOWN",
+                    "supply_date": "",
+                    "supply_error": "",
                 }
                 if code_norm in stock_ticks:
                     ld.update(stock_ticks[code_norm])
@@ -583,6 +594,10 @@ def create_app() -> FastAPI:
                     "individual_flow": None,
                     "supply_status": "DATA_NA",
                     "supply_updated_at": "",
+                    "supply_source": "",
+                    "supply_recency": "UNKNOWN",
+                    "supply_date": "",
+                    "supply_error": "",
                 }
                 if code_norm in stock_ticks:
                     ld.update(stock_ticks[code_norm])
@@ -673,6 +688,7 @@ def create_app() -> FastAPI:
             indices=indices_snapshot,
             session=session_now,
         )
+        app.latest_decision_summary = decision_summary
         # Enrich alphaforge_picks with decision fields
         decision_by_symbol = {r["symbol"]: r for r in decision_summary["results"]}
         for pick in alphaforge_picks:
@@ -705,6 +721,13 @@ def create_app() -> FastAPI:
             pick["de_has_strength"] = dec.get("has_strength", False)
             pick["de_has_supply"] = dec.get("has_supply", False)
             pick["de_supply_timestamp"] = dec.get("supply_timestamp", "")
+            pick["de_supply_recency"] = dec.get("supply_recency", "UNKNOWN")
+            pick["de_supply_date"] = dec.get("supply_date", "")
+            pick["de_supply_status"] = dec.get("supply_status", "DATA_NA")
+
+            # Base pick keys for UI ease of access
+            pick["supply_recency"] = pick.get("supply_recency") or "UNKNOWN"
+            pick["supply_date"] = pick.get("supply_date") or ""
 
         return {
             "themes": themes_result,
@@ -719,6 +742,7 @@ def create_app() -> FastAPI:
             "alphaforge_picks": alphaforge_picks,
             "quote_polling": display_quote_status,
             "supply_data_reason": supply_reason,
+            "supply_polling": getattr(app, "supply_polling_status", {}),
             "decision_counts": decision_summary["decision_counts"],
             "decision_session": session_now,
             "decision_market_gate": decision_summary["market_gate"],
@@ -748,6 +772,13 @@ def create_app() -> FastAPI:
                 "strength": s.execution_strength,
                 "supply_status": s.supply_status,
                 "supply_updated_at": s.supply_updated_at,
+                "supply_source": s.supply_source,
+                "supply_recency": s.supply_recency,
+                "supply_date": s.supply_date,
+                "supply_error": s.supply_error,
+                "foreign_flow": s.foreign_flow,
+                "institution_flow": s.institution_flow,
+                "individual_flow": s.individual_flow,
                 "updated_at": s.last_tick_ts.isoformat(),
             }
             for code, s in app_state.stocks.items()
@@ -815,32 +846,32 @@ def create_app() -> FastAPI:
     async def get_surges(sort: str = "trading_value", limit: int = 10):
         """Get top movers / high volume stocks."""
         from jason_checks.kis_rest import fetch_top_movers_cached
-        
+
         # Mapping frontend sort to KIS sort
         # 0=상승률, 1=하락률
         kis_sort = "0" if sort == "change_pct" else "0" # Defaulting to volume/change for now
-        
+
         # Currently fetch_top_movers only supports KR, need US version later
         if CURRENT_MARKET == "KR":
             data = await fetch_top_movers_cached(market="J", sort=kis_sort, limit=limit)
         else:
             from jason_checks.kis_rest import fetch_us_top_movers
             data = await fetch_us_top_movers(limit=limit)
-            
+
         return {"surges": data, "market": CURRENT_MARKET}
-        
+
     @app.get("/api/scan")
     async def run_scan(max_symbols: int = Query(30, ge=1, le=500)):
         """Run value investment scanners."""
         from jason_checks.kis_rest import get_rest_client
         scanner = ValueScanner(get_rest_client())
-        
+
         results_a = await scanner.scan_park_sung_jin()
         results_b = await scanner.scan_byun_doo_shik()
         results_c = await scanner.scan_seohee_father()
         export_source = flatten_alphaforge_rows([results_a, results_b, results_c])[:max_symbols]
         alphaforge_export_stats = export_alphaforge_candidates(export_source)
-        
+
         return {
             "results": {
                 "a": results_a,
