@@ -69,6 +69,16 @@ function timaApp() {
         decisionSession: '',
         decisionMarketGate: {},
         decisionSetupTop3: [],
+        decisionQualitySummary: {},
+        dataConfidenceCounts: {},
+        reasonCodeCounts: {},
+        marketGateLevel: '',
+        marketGateReason: '',
+        marketGateBlocksBuyNow: false,
+        journalStatus: {},
+        sectorAuditWarnings: [],
+        duplicatedSymbols: [],
+        suspiciousSectorMembers: [],
 
         // Methods
         async init() {
@@ -933,6 +943,26 @@ ${baselineSvg}\
             return `내일 관찰 후보: ${rows.map(row => `${row.name || row.symbol} ${row.setup_score || 0}점`).join(' / ')}`;
         },
 
+        deTopReasonCodesText(limit = 3) {
+            const rows = Object.entries(this.reasonCodeCounts || {})
+                .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+                .slice(0, limit);
+            if (rows.length === 0) return '차단 원인 TOP3: -';
+            return `차단 원인 TOP3: ${rows.map(([code, count]) => `${code} ${count}`).join(' / ')}`;
+        },
+
+        deDataConfidenceCountsText() {
+            const c = this.dataConfidenceCounts || {};
+            return `데이터 신뢰 HIGH ${c.HIGH || 0} / MID ${c.MID || 0} / LOW ${c.LOW || 0}`;
+        },
+
+        deSectorAuditText() {
+            const warnings = Array.isArray(this.sectorAuditWarnings) ? this.sectorAuditWarnings.length : 0;
+            const duplicated = Array.isArray(this.duplicatedSymbols) ? this.duplicatedSymbols.length : 0;
+            const suspicious = Array.isArray(this.suspiciousSectorMembers) ? this.suspiciousSectorMembers.length : 0;
+            return `섹터 경고 ${warnings} · 중복 ${duplicated} · 의심 ${suspicious}`;
+        },
+
         liveMomentumPicks() {
             const alphaByCode = new Map(this.alphaForgePicks().map(s => [s.code, s]));
             const rows = Object.values(this.stocks || []).map(stock => {
@@ -989,6 +1019,10 @@ ${baselineSvg}\
             lines.push('[Action Board]');
             const dc = this.decisionCounts || {};
             lines.push(`BUY_NOW ${dc.BUY_NOW || 0} / STARTER ${dc.STARTER_POSITION || 0} / CONDITIONAL ${dc.CONDITIONAL_BUY || 0} / WATCH ${dc.WATCH_ONLY || 0} / AVOID ${dc.AVOID || 0}`);
+            lines.push(`시장 게이트 ${this.marketGateLevel || this.decisionMarketGate?.market_gate_level || '-'} / ${this.marketGateReason || this.decisionMarketGate?.market_gate_reason || this.decisionMarketGate?.reason || '-'}`);
+            lines.push(this.deTopReasonCodesText());
+            lines.push(this.deDataConfidenceCountsText());
+            lines.push(this.deSectorAuditText());
             if (!this.deHasBuySignal()) {
                 const reason = this.decisionSession === 'REGULAR'
                     ? (this.decisionMarketGate?.reason || '조건 미충족')
@@ -1054,6 +1088,8 @@ ${baselineSvg}\
                 const nextTrigger = this.deNextSessionTrigger(stock);
                 const nextPlan = this.deNextSessionPlan(stock);
                 const setupReason = this.deSetupReason(stock);
+                const reasonCodes = Array.isArray(stock.de_reason_codes) ? stock.de_reason_codes.join(',') : '-';
+                const qualityFlags = Array.isArray(stock.de_data_quality_flags) ? stock.de_data_quality_flags.join(',') : '-';
                 const deConfirmations = Array.isArray(stock.de_required_confirmations)
                     ? stock.de_required_confirmations.join(', ')
                     : (stock.de_required_confirmations || '-');
@@ -1084,9 +1120,12 @@ ${baselineSvg}\
                         `DECISION_ENGINE ${deDecision}`,
                         `confidence ${deConfidence}`,
                         `data_confidence ${deDataConfidence}`,
+                        `data_quality_flags ${qualityFlags || '-'}`,
+                        `quote_age_sec ${stock.de_quote_age_sec ?? '-'}`,
                         `setup_score ${setupScore}`,
                         `setup_label ${setupLabel}`,
                         `setup_reason ${setupReason}`,
+                        `reason_codes ${reasonCodes || '-'}`,
                         `no_buy_reason ${deReason}`,
                         `entry_trigger ${deTrigger}`,
                         `next_session_trigger ${nextTrigger}`,
@@ -1370,6 +1409,16 @@ ${baselineSvg}\
                 if (data.decision_session) this.decisionSession = data.decision_session;
                 if (data.decision_market_gate) this.decisionMarketGate = data.decision_market_gate;
                 if (data.decision_setup_top3) this.decisionSetupTop3 = data.decision_setup_top3;
+                if (data.decision_quality_summary) this.decisionQualitySummary = data.decision_quality_summary;
+                if (data.data_confidence_counts) this.dataConfidenceCounts = data.data_confidence_counts;
+                if (data.reason_code_counts) this.reasonCodeCounts = data.reason_code_counts;
+                if (data.market_gate_level) this.marketGateLevel = data.market_gate_level;
+                if (data.market_gate_reason) this.marketGateReason = data.market_gate_reason;
+                if (data.market_gate_blocks_buy_now !== undefined) this.marketGateBlocksBuyNow = !!data.market_gate_blocks_buy_now;
+                if (data.journal_status) this.journalStatus = data.journal_status;
+                if (data.sector_audit_warnings) this.sectorAuditWarnings = data.sector_audit_warnings;
+                if (data.duplicated_symbols) this.duplicatedSymbols = data.duplicated_symbols;
+                if (data.suspicious_sector_members) this.suspiciousSectorMembers = data.suspicious_sector_members;
             } catch (error) {
                 console.error('Failed to load themes:', error);
             }

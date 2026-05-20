@@ -679,6 +679,14 @@ def create_app() -> FastAPI:
             pick["de_next_session_trigger"] = dec.get("next_session_trigger", "")
             pick["de_next_session_plan"] = dec.get("next_session_plan", "")
             pick["de_setup_reason"] = dec.get("setup_reason", "")
+            pick["de_reason_codes"] = dec.get("reason_codes", [])
+            pick["de_data_quality_flags"] = dec.get("data_quality_flags", [])
+            pick["de_quote_age_sec"] = dec.get("quote_age_sec")
+            pick["de_has_price"] = dec.get("has_price", False)
+            pick["de_has_trading_value"] = dec.get("has_trading_value", False)
+            pick["de_has_strength"] = dec.get("has_strength", False)
+            pick["de_has_supply"] = dec.get("has_supply", False)
+            pick["de_supply_timestamp"] = dec.get("supply_timestamp", "")
 
         return {
             "themes": themes_result,
@@ -697,6 +705,16 @@ def create_app() -> FastAPI:
             "decision_session": session_now,
             "decision_market_gate": decision_summary["market_gate"],
             "decision_setup_top3": decision_summary.get("setup_top3", []),
+            "decision_quality_summary": decision_summary.get("decision_quality_summary", {}),
+            "data_confidence_counts": decision_summary.get("data_confidence_counts", {}),
+            "reason_code_counts": decision_summary.get("reason_code_counts", {}),
+            "market_gate_level": decision_summary.get("market_gate_level", ""),
+            "market_gate_reason": decision_summary.get("market_gate_reason", ""),
+            "market_gate_blocks_buy_now": decision_summary.get("market_gate_blocks_buy_now", False),
+            "journal_status": decision_summary.get("journal_status", {}),
+            "sector_audit_warnings": decision_summary.get("sector_audit_warnings", []),
+            "duplicated_symbols": decision_summary.get("duplicated_symbols", []),
+            "suspicious_sector_members": decision_summary.get("suspicious_sector_members", []),
         }
 
     @app.get("/api/decision-summary")
@@ -710,6 +728,8 @@ def create_app() -> FastAPI:
                 "cumulative_trading_value": s.cumulative_trading_value,
                 "strength": s.execution_strength,
                 "supply_status": s.supply_status,
+                "supply_updated_at": s.supply_updated_at,
+                "updated_at": s.last_tick_ts.isoformat(),
             }
             for code, s in app_state.stocks.items()
         }

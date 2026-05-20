@@ -193,6 +193,16 @@
                         </div>
                         <div class="mt-2 text-[10.5px] font-black text-blue-800 bg-white/80 rounded px-2 py-1 border border-blue-100 inline-block"
                              x-text="deSetupTop3Text()"></div>
+                        <div class="mt-1 flex flex-wrap gap-1.5 text-[9px] font-bold text-slate-600">
+                            <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
+                                  x-text="`시장 ${marketGateLevel || decisionMarketGate?.market_gate_level || '-'}`"></span>
+                            <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
+                                  x-text="deTopReasonCodesText()"></span>
+                            <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
+                                  x-text="deDataConfidenceCountsText()"></span>
+                            <span class="bg-white/80 rounded px-1.5 py-0.5 border border-slate-100"
+                                  x-text="deSectorAuditText()"></span>
+                        </div>
                     </div>
 
                     <!-- AlphaForge Picks Panel (Full-Width Row List) -->
@@ -269,6 +279,12 @@
                                                 <div class="text-slate-600 mt-0.5" style="word-break: keep-all;">
                                                     <span class="bg-slate-100 px-1 py-0.2 rounded mr-1">⚙️ 셋업 상태</span>
                                                     <span x-text="stock.de_setup_reason"></span>
+                                                </div>
+                                            </template>
+                                            <template x-if="stock.de_reason_codes && stock.de_reason_codes.length">
+                                                <div class="text-slate-500 mt-0.5" style="word-break: keep-all;">
+                                                    <span class="bg-slate-100 px-1 py-0.2 rounded mr-1">reason</span>
+                                                    <span x-text="stock.de_reason_codes.slice(0, 3).join(', ')"></span>
                                                 </div>
                                             </template>
                                         </div>

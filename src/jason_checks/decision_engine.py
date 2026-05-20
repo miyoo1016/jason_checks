@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 from collections import deque
+from collections import Counter
 
 import structlog
 
@@ -33,7 +34,14 @@ def _is_market_open(session: str) -> bool:
 def _assess_market_gate(indices: dict[str, Any]) -> dict[str, Any]:
     """KOSPI+KOSDAQ 지수 상태를 판단하여 시장 게이트 결과를 반환."""
     if not indices:
-        return {"ok": True, "reason": "지수 미확인", "level": "UNKNOWN"}
+        return {
+            "ok": True,
+            "reason": "지수 미확인",
+            "level": "NORMAL",
+            "market_gate_level": "NORMAL",
+            "market_gate_reason": "지수 미확인",
+            "market_gate_blocks_buy_now": False,
+        }
 
     pcts = []
     for idx in indices.values():
@@ -41,18 +49,40 @@ def _assess_market_gate(indices: dict[str, Any]) -> dict[str, Any]:
         pcts.append(pct)
 
     if not pcts:
-        return {"ok": True, "reason": "지수 미확인", "level": "UNKNOWN"}
+        return {
+            "ok": True,
+            "reason": "지수 미확인",
+            "level": "NORMAL",
+            "market_gate_level": "NORMAL",
+            "market_gate_reason": "지수 미확인",
+            "market_gate_blocks_buy_now": False,
+        }
 
     avg_pct = sum(pcts) / len(pcts)
     min_pct = min(pcts)
 
-    if min_pct <= -2.0:
-        return {"ok": False, "reason": f"지수 급락 ({min_pct:.2f}%)", "level": "CRASH"}
-    if avg_pct <= -1.0:
-        return {"ok": False, "reason": f"지수 약세 (평균 {avg_pct:.2f}%)", "level": "WEAK"}
-    if avg_pct < 0:
-        return {"ok": True, "reason": f"지수 소폭 약세 ({avg_pct:.2f}%)", "level": "SOFT"}
-    return {"ok": True, "reason": f"지수 보통 ({avg_pct:.2f}%)", "level": "OK"}
+    if min_pct <= -3.0:
+        level = "CRASH"
+        reason = f"지수 급락 ({min_pct:.2f}%)"
+    elif min_pct <= -2.0:
+        level = "RISK_OFF"
+        reason = f"지수 위험회피 ({min_pct:.2f}%)"
+    elif min_pct <= -1.0 or avg_pct <= -0.5:
+        level = "CAUTION"
+        reason = f"지수 주의 (최저 {min_pct:.2f}%, 평균 {avg_pct:.2f}%)"
+    else:
+        level = "NORMAL"
+        reason = f"지수 보통 ({avg_pct:.2f}%)"
+
+    blocks = level in ("RISK_OFF", "CRASH")
+    return {
+        "ok": not blocks,
+        "reason": reason,
+        "level": level,
+        "market_gate_level": level,
+        "market_gate_reason": reason,
+        "market_gate_blocks_buy_now": blocks,
+    }
 
 
 def _assess_sector_gate(theme: dict[str, Any]) -> dict[str, Any]:
@@ -70,19 +100,6 @@ def _assess_sector_gate(theme: dict[str, Any]) -> dict[str, Any]:
     if positive_count < 2 and live_count >= 2:
         return {"confirmed": False, "reason": f"섹터 내 강세 종목 부족 ({positive_count}/{live_count})", "avg_change": avg_change}
     return {"confirmed": True, "reason": f"섹터 OK ({positive_count}/{max(live_count,1)} 양호)", "avg_change": avg_change}
-
-
-def _data_confidence(stock: dict[str, Any]) -> str:
-    """데이터 신뢰도 판단: HIGH / MID / LOW"""
-    price = float(stock.get("price") or 0)
-    trading_value = int(stock.get("cumulative_trading_value") or 0)
-    supply_status = stock.get("supply_status", "DATA_NA")
-
-    if price <= 0:
-        return "LOW"
-    if supply_status == "DATA_NA" or trading_value <= 0:
-        return "MID"
-    return "HIGH"
 
 
 def _chase_risk(change_pct: float, strength: float, box_price: float, price: float) -> bool:
@@ -105,6 +122,112 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return default
+
+
+def _quote_age_sec(stock: dict[str, Any]) -> int | None:
+    updated_at = stock.get("updated_at") or stock.get("quote_updated_at")
+    if not updated_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(updated_at))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=KST)
+        return max(0, int((datetime.now(KST) - dt.astimezone(KST)).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _data_quality(stock: dict[str, Any]) -> dict[str, Any]:
+    """Data Confidence v2: quote/supply 품질을 구조화해서 반환."""
+    price = _to_float(stock.get("price"))
+    trading_value = int(_to_float(stock.get("cumulative_trading_value")))
+    strength = _to_float(stock.get("strength"))
+    supply_status = str(stock.get("supply_status") or "DATA_NA")
+    supply_timestamp = str(stock.get("supply_updated_at") or "")
+    quote_age = _quote_age_sec(stock)
+
+    has_price = price > 0
+    has_trading_value = trading_value > 0
+    has_strength = strength > 0
+    has_supply = supply_status != "DATA_NA" and bool(supply_timestamp)
+    quote_stale = quote_age is not None and quote_age > 180
+    flags: list[str] = []
+
+    if not has_price:
+        flags.append("PRICE_MISSING")
+    if not has_trading_value:
+        flags.append("TRADING_VALUE_MISSING")
+    if not has_strength:
+        flags.append("STRENGTH_MISSING")
+    if not has_supply:
+        flags.append("SUPPLY_DATA_NA")
+    if quote_age is None:
+        flags.append("QUOTE_TIMESTAMP_MISSING")
+    elif quote_stale:
+        flags.append("QUOTE_STALE")
+
+    if not has_price:
+        confidence = "LOW"
+    elif has_price and has_trading_value:
+        confidence = "MID"
+        if has_strength and has_supply and not quote_stale:
+            confidence = "HIGH"
+    else:
+        confidence = "LOW"
+
+    # 수급 미확인은 절대 HIGH가 되지 않게 한다.
+    if not has_supply and confidence == "HIGH":
+        confidence = "MID"
+    if quote_stale and confidence == "HIGH":
+        confidence = "MID"
+
+    return {
+        "data_confidence": confidence,
+        "data_quality_flags": flags,
+        "quote_age_sec": quote_age,
+        "has_price": has_price,
+        "has_trading_value": has_trading_value,
+        "has_strength": has_strength,
+        "has_supply": has_supply,
+        "supply_timestamp": supply_timestamp,
+    }
+
+
+def _data_confidence(stock: dict[str, Any]) -> str:
+    return str(_data_quality(stock)["data_confidence"])
+
+
+def _base_reason_codes(
+    price: float,
+    strength: float,
+    alert_type: str,
+    vcp_status: str,
+    box_price: float,
+    market_gate: dict[str, Any],
+    sector_gate: dict[str, Any],
+    supply_status: str,
+) -> list[str]:
+    codes: list[str] = []
+    gate_level = market_gate.get("market_gate_level") or market_gate.get("level")
+    if gate_level == "CRASH":
+        codes.append("MARKET_CRASH")
+    elif gate_level == "RISK_OFF":
+        codes.append("MARKET_RISK_OFF")
+    if alert_type == "RISK_WATCH":
+        codes.append("RISK_WATCH")
+    if vcp_status == "REVERSE_EXPANSION":
+        codes.append("VCP_REVERSE_EXPANSION")
+    if price <= 0:
+        codes.append("PRICE_MISSING")
+    if box_price > 0 and price > 0 and price < box_price:
+        codes.append("BELOW_BOX")
+    if not sector_gate.get("confirmed", True):
+        codes.append("SECTOR_WEAK")
+    if supply_status == "DATA_NA":
+        codes.append("SUPPLY_DATA_NA")
+    if 0 < strength < 90:
+        codes.append("STRENGTH_WEAK")
+    return list(dict.fromkeys(codes))
 
 
 def _setup_label(score: int, risk_only: bool) -> str:
@@ -283,9 +406,14 @@ def evaluate_stock(
     vcp_status = str(stock.get("vcp_status") or "")
     box_price = float(stock.get("box_upper_price") or 0)
 
-    data_conf = _data_confidence(stock)
+    data_quality = _data_quality(stock)
+    data_conf = str(data_quality["data_confidence"])
     chase = _chase_risk(change_pct, strength, box_price, price)
     setup = _setup_profile(stock, data_conf, sector_gate)
+    reason_codes = _base_reason_codes(
+        price, strength, alert_type, vcp_status, box_price,
+        market_gate, sector_gate, supply_status,
+    )
 
     no_buy_reasons: list[str] = []
     entry_trigger_parts: list[str] = []
@@ -313,6 +441,10 @@ def evaluate_stock(
             "required_confirmations": [],
             "stable": False,
             "theme": theme_name,
+            "price": price,
+            "box_upper_price": box_price,
+            "reason_codes": reason_codes,
+            **data_quality,
             **setup,
         }
 
@@ -322,7 +454,8 @@ def evaluate_stock(
         _record_signal(symbol, "AVOID")
         result = _make_result(symbol, name, "AVOID", 0, data_conf,
                               "데이터 대기", "현재가 없음", "", "",
-                              False, 0, [], theme_name, False)
+                              False, 0, [], theme_name, False,
+                              price, box_price, reason_codes, data_quality)
         result.update(setup)
         return result
 
@@ -420,7 +553,7 @@ def evaluate_stock(
         alert_type == "RISK_WATCH"
         or vcp_status == "REVERSE_EXPANSION"
         or chase
-        or not market_gate["ok"]
+        or market_gate.get("market_gate_blocks_buy_now", not market_gate["ok"])
         or trading_value < 200_000_000
     )
 
@@ -436,7 +569,7 @@ def evaluate_stock(
     elif (
         box_above
         and not no_buy_reasons
-        and market_gate["ok"]
+        and not market_gate.get("market_gate_blocks_buy_now", not market_gate["ok"])
         and sector_gate["confirmed"]
         and strength >= 110
         and trading_value >= 1_000_000_000
@@ -463,7 +596,7 @@ def evaluate_stock(
         action_reason, "; ".join(no_buy_reasons) if no_buy_reasons else "",
         entry_trigger, invalidation,
         chase, max_position_pct, required_confirmations,
-        theme_name, stable,
+        theme_name, stable, price, box_price, reason_codes, data_quality,
     )
     result.update(setup)
     return result
@@ -472,7 +605,8 @@ def evaluate_stock(
 def _make_result(symbol, name, decision, score, data_conf,
                  action_reason, no_buy_reason, entry_trigger,
                  invalidation_reason, chase, max_pct, req_conf,
-                 theme, stable) -> dict[str, Any]:
+                 theme, stable, price=0.0, box_price=0.0,
+                 reason_codes=None, data_quality=None) -> dict[str, Any]:
     decision_display = {
         "BUY_NOW": "매수 가능",
         "STARTER_POSITION": "소량 선취",
@@ -480,6 +614,7 @@ def _make_result(symbol, name, decision, score, data_conf,
         "WATCH_ONLY": "관찰",
         "AVOID": "매수 금지",
     }.get(decision, decision)
+    quality = dict(data_quality or {})
     return {
         "symbol": symbol,
         "name": name,
@@ -496,6 +631,10 @@ def _make_result(symbol, name, decision, score, data_conf,
         "required_confirmations": req_conf,
         "stable": stable,
         "theme": theme,
+        "price": price,
+        "box_upper_price": box_price,
+        "reason_codes": list(reason_codes or []),
+        **quality,
         "setup_score": 0,
         "setup_label": "RISK_ONLY",
         "next_session_trigger": entry_trigger,
@@ -514,6 +653,7 @@ def run_decision_engine(
 
     market_gate = _assess_market_gate(indices)
     results: list[dict[str, Any]] = []
+    sector_audit = _audit_sectors(themes)
 
     for stock in alphaforge_picks:
         # 해당 종목이 속한 테마 찾기
@@ -565,11 +705,26 @@ def run_decision_engine(
         "MID": sum(1 for r in results if r["data_confidence"] == "MID"),
         "LOW": sum(1 for r in results if r["data_confidence"] == "LOW"),
     }
+    reason_code_counts = dict(Counter(
+        code for r in results for code in r.get("reason_codes", [])
+    ))
+    decision_quality_summary = {
+        "total": len(results),
+        "has_price": sum(1 for r in results if r.get("has_price")),
+        "has_trading_value": sum(1 for r in results if r.get("has_trading_value")),
+        "has_strength": sum(1 for r in results if r.get("has_strength")),
+        "has_supply": sum(1 for r in results if r.get("has_supply")),
+        "quote_stale": sum(1 for r in results if "QUOTE_STALE" in r.get("data_quality_flags", [])),
+        "price_missing": sum(1 for r in results if "PRICE_MISSING" in r.get("data_quality_flags", [])),
+    }
 
     journal_status = _write_decision_journal(results, session, market_gate)
 
     return {
         "market_gate": market_gate,
+        "market_gate_level": market_gate.get("market_gate_level"),
+        "market_gate_reason": market_gate.get("market_gate_reason"),
+        "market_gate_blocks_buy_now": market_gate.get("market_gate_blocks_buy_now"),
         "session": session,
         "decision_counts": decision_counts,
         "results": results,
@@ -577,7 +732,50 @@ def run_decision_engine(
         "setup_top3": setup_top3,
         "no_buy_reasons": no_buy_reasons,
         "data_confidence_summary": data_confidence_summary,
+        "data_confidence_counts": data_confidence_summary,
+        "reason_code_counts": reason_code_counts,
+        "decision_quality_summary": decision_quality_summary,
+        "sector_audit_warnings": sector_audit["sector_audit_warnings"],
+        "duplicated_symbols": sector_audit["duplicated_symbols"],
+        "suspicious_sector_members": sector_audit["suspicious_sector_members"],
         "journal_write_status": journal_status,
+        "journal_status": journal_status,
+    }
+
+
+def _audit_sectors(themes: dict[str, Any]) -> dict[str, Any]:
+    """섹터 구성 이상 징후를 경고만 한다. 자동 수정하지 않는다."""
+    seen: dict[str, list[str]] = {}
+    suspicious: list[dict[str, Any]] = []
+    for theme_name, theme in (themes or {}).items():
+        leaders = theme.get("leaders") or theme.get("stocks") or []
+        for row in leaders:
+            code = str(row.get("code") or row.get("symbol") or "")
+            name = str(row.get("name") or "")
+            if not code or not name:
+                suspicious.append({"theme": theme_name, "code": code, "name": name, "reason": "missing_code_or_name"})
+                continue
+            seen.setdefault(code, []).append(theme_name)
+
+    duplicated = [
+        {"code": code, "themes": themes_for_code}
+        for code, themes_for_code in seen.items()
+        if len(set(themes_for_code)) > 1
+    ]
+    suspicious.extend(
+        {"code": item["code"], "themes": item["themes"], "reason": "appears_in_3_or_more_sectors"}
+        for item in duplicated
+        if len(set(item["themes"])) >= 3
+    )
+    warnings: list[str] = []
+    if duplicated:
+        warnings.append(f"중복 섹터 종목 {len(duplicated)}개")
+    if suspicious:
+        warnings.append(f"섹터 구성 점검 필요 {len(suspicious)}건")
+    return {
+        "sector_audit_warnings": warnings,
+        "duplicated_symbols": duplicated[:30],
+        "suspicious_sector_members": suspicious[:30],
     }
 
 
@@ -590,22 +788,25 @@ def _write_decision_journal(results: list[dict], session: str, market_gate: dict
         written = 0
         with open(path, "a", encoding="utf-8") as f:
             for r in results:
-                if r.get("decision") in ("AVOID",) and not r.get("confidence_score", 0):
-                    continue
                 row = {
                     "timestamp": now_ts,
+                    "session": session,
+                    "market_gate_level": market_gate.get("market_gate_level", market_gate.get("level", "")),
                     "symbol": r["symbol"],
                     "name": r["name"],
                     "decision": r["decision"],
                     "confidence_score": r["confidence_score"],
-                    "price": None,
-                    "trigger": r.get("entry_trigger", ""),
+                    "setup_score": r.get("setup_score", 0),
+                    "setup_label": r.get("setup_label", ""),
+                    "price": r.get("price"),
+                    "box_upper_price": r.get("box_upper_price"),
+                    "reason_codes": r.get("reason_codes", []),
+                    "no_buy_reason": r.get("no_buy_reason", ""),
+                    "entry_trigger": r.get("entry_trigger", ""),
                     "invalidation": r.get("invalidation_reason", ""),
                     "max_position_pct": r["max_position_pct"],
-                    "market_state": market_gate.get("level", ""),
-                    "sector_state": r.get("theme", ""),
-                    "no_buy_reason": r.get("no_buy_reason", ""),
                     "data_confidence": r["data_confidence"],
+                    "data_quality_flags": r.get("data_quality_flags", []),
                 }
                 f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
                 written += 1
