@@ -532,8 +532,30 @@ function timaApp() {
 </svg>`;
 
             if (!chart || status === 'DATA_NA') return placeholder('DATA_NA', '#94a3b8');
-            const pts = Array.isArray(chart.points) ? chart.points : [];
+            let pts = Array.isArray(chart.points) ? chart.points : [];
             if (status !== 'OK' || pts.length < 2) return placeholder('collecting', '#94a3b8');
+
+            let isBucketed = false;
+            let hasTimestamps = pts.every(p => p.t);
+            if (hasTimestamps) {
+                const now = new Date();
+                const today9am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0).getTime();
+                const BUCKET_MS = 5 * 60 * 1000;
+                
+                const buckets = new Map();
+                for (const p of pts) {
+                    if (p.t < today9am) continue;
+                    const b = Math.floor(p.t / BUCKET_MS);
+                    buckets.set(b, p);
+                }
+                const sortedKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
+                const bucketed = sortedKeys.map(k => buckets.get(k));
+                
+                if (bucketed.length >= 2) {
+                    pts = bucketed;
+                    isBucketed = true;
+                }
+            }
 
             const ys = pts.map(p => Number(p.p)).filter(v => Number.isFinite(v) && v > 0);
             if (ys.length < 2) return placeholder('collecting', '#94a3b8');
@@ -594,12 +616,15 @@ function timaApp() {
                              ys.map((v, i) => `L${xOf(i)},${yOf(v)}`).join(' ') +
                              ` L${xOf(ys.length - 1)},${H} Z`;
 
+            const metaTextSvg = isBucketed ? `<text x="${W - 2}" y="${H - 2}" font-size="9" fill="#94a3b8" text-anchor="end" opacity="0.8">5m</text>` : '';
+
             return `\
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
 ${baselineSvg}\
 <path d="${areaPath}" fill="${fill}" stroke="none"/>\
 <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>\
 <circle cx="${xOf(ys.length - 1)}" cy="${yOf(last)}" r="2" fill="${stroke}"/>\
+${metaTextSvg}\
 </svg>`;
         },
 
@@ -639,7 +664,7 @@ ${baselineSvg}\
             if (!last || Math.abs(Number(last.p) - p) > 0.0001 || now - Number(last.t || 0) > 30000) {
                 chart.points.push({ t: now, p });
             }
-            chart.points = chart.points.slice(-48);
+            chart.points = chart.points.slice(-1500);
             store[key] = chart;
         },
 
