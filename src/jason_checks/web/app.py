@@ -594,6 +594,59 @@ def create_app() -> FastAPI:
 
         return {"status": "ok", "market": market, "subscribed": len(new_codes)}
 
+    _us_cache = {"data": [], "updated_at": 0, "session_status": "UNKNOWN"}
+
+    @app.get("/api/us/watchlist")
+    async def get_us_watchlist():
+        import time
+        import json
+        now = time.time()
+        if now - _us_cache["updated_at"] < 60 and _us_cache["data"]:
+            return {
+                "session_status": _us_cache["session_status"],
+                "updated_at": datetime.fromtimestamp(_us_cache["updated_at"]).isoformat() + "Z",
+                "rows": _us_cache["data"],
+                "available": True
+            }
+
+        p = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/us_watchlist.json"))
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            items = meta.get("items", [])
+        except Exception as e:
+            return {"available": False, "reason": f"Failed to read us_watchlist: {e}"}
+
+        if not items:
+            return {"available": False, "reason": "us_watchlist.json is empty"}
+
+        async def _fetch(sym):
+            if sym in ("VIX", "US10Y", "USDKRW"):
+                return {"symbol": sym, "price": None, "change_pct": None}
+            try:
+                res = await fetch_overseas_price(sym)
+                if res:
+                    return {"symbol": sym, "price": res.get("price"), "change_pct": res.get("change_pct")}
+            except:
+                pass
+            return {"symbol": sym, "price": None, "change_pct": None}
+
+        tasks = [_fetch(item["symbol"]) for item in items]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        rows = [r for r in results if isinstance(r, dict)]
+
+        sess = get_session_status(market="US")
+        _us_cache["data"] = rows
+        _us_cache["updated_at"] = now
+        _us_cache["session_status"] = sess
+
+        return {
+            "session_status": sess,
+            "updated_at": datetime.fromtimestamp(now).isoformat() + "Z",
+            "rows": rows,
+            "available": True
+        }
+
     @app.get("/api/state")
     async def get_state():
         return {
