@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import time
+import json
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -27,16 +29,56 @@ from jason_checks.config import get_settings
 logger = structlog.get_logger()
 
 # ── 쿨다운 상수 ──────────────────────────────────────────────────────────────
-_COOLDOWN_SEC = 300          # AlphaForge 종목+이벤트 쿨다운 5분
-_INDEX_COOLDOWN_SEC = 900    # 지수 알람 쿨다운 15분
+_COOLDOWN_SEC = 1800          # AlphaForge 종목+이벤트 쿨다운 5분
+_INDEX_COOLDOWN_SEC = 1800    # 지수 알람 쿨다운 15분
 _TEST_SENT_KEY = "__test__"  # 테스트 발송 중복 방지 키
 
 # ── 인메모리 상태 ─────────────────────────────────────────────────────────────
-_recent_alerts: dict[tuple[str, str], float] = {}   # (symbol, event_type) → ts
+_recent_alerts: dict[str, float] = {}   # (symbol, event_type) → ts
 _hourly_sent: list[float] = []                       # 전역 발송 시각 목록
+_daily_sent: dict[str, int] = {}
+_daily_reset_date: str = ""
+_STATE_FILE = "data/runtime/telegram_alert_state.json"
+
+def _load_state():
+    global _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date
+    try:
+        if os.path.exists(_STATE_FILE):
+            with open(_STATE_FILE, "r") as f:
+                d = json.load(f)
+            _recent_alerts = d.get("recent_alerts", {})
+            _hourly_sent = d.get("hourly_sent", [])
+            _daily_sent = d.get("daily_sent", {})
+            _daily_reset_date = d.get("daily_reset_date", "")
+    except Exception:
+        pass
+
+def _save_state():
+    try:
+        os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+        with open(_STATE_FILE, "w") as f:
+            json.dump({
+                "recent_alerts": _recent_alerts,
+                "hourly_sent": _hourly_sent,
+                "daily_sent": _daily_sent,
+                "daily_reset_date": _daily_reset_date
+            }, f)
+    except Exception:
+        pass
+
+_load_state()
+
 
 # ── 설정 상수 ─────────────────────────────────────────────────────────────────
-_MAX_PER_HOUR = 10          # 전역 시간당 최대 발송 수
+
+def _get_max_per_hour() -> int:
+    try: return int(os.environ.get("KR_TELEGRAM_GLOBAL_MAX_PER_HOUR", 10))
+    except ValueError: return 10
+
+def _get_daily_max_per_symbol() -> int:
+    try: return int(os.environ.get("KR_TELEGRAM_DAILY_MAX_PER_SYMBOL", 2))
+    except ValueError: return 2
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,36 +125,52 @@ def _is_dry_run() -> bool:
 # 쿨다운 / 폭주 방지
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _check_daily_reset(now: float | None = None) -> None:
+    global _daily_sent, _daily_reset_date
+    now_ts = now if now is not None else time.time()
+    today = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
+    if _daily_reset_date != today:
+        _daily_sent.clear()
+        _daily_reset_date = today
+
 def _should_send(
     symbol: str,
     event_type: str,
+    event_level: str = "",
     now: float | None = None,
     mark: bool = True,
     cooldown_sec: float = _COOLDOWN_SEC,
 ) -> bool:
-    now = now if now is not None else time.time()
-    key = (symbol, event_type)
+    now_ts = now if now is not None else time.time()
+    _check_daily_reset(now_ts)
+    key = f"{symbol}:{event_type}:{event_level}"
     last = _recent_alerts.get(key, 0.0)
-    if now - last < cooldown_sec:
+    if now_ts - last < cooldown_sec:
         return False
     if mark:
-        _recent_alerts[key] = now
+        _recent_alerts[key] = now_ts
+        if symbol and not symbol.startswith("IDX_") and symbol != "__test__":
+            _daily_sent[symbol] = _daily_sent.get(symbol, 0) + 1
+        _save_state()
     return True
 
+def _daily_check(symbol: str, now: float | None = None) -> bool:
+    now_ts = now if now is not None else time.time()
+    _check_daily_reset(now_ts)
+    if not symbol or symbol.startswith("IDX_") or symbol == "__test__":
+        return True
+    return _daily_sent.get(symbol, 0) < _get_daily_max_per_symbol()
 
 def _global_hourly_check(now: float | None = None) -> bool:
-    """Return True if under hourly cap; side-effect: prune old entries."""
-    now = now if now is not None else time.time()
-    cutoff = now - 3600
-    # 오래된 항목 제거
+    now_ts = now if now is not None else time.time()
+    cutoff = now_ts - 3600
     while _hourly_sent and _hourly_sent[0] < cutoff:
         _hourly_sent.pop(0)
-    return len(_hourly_sent) < _MAX_PER_HOUR
-
+    return len(_hourly_sent) < _get_max_per_hour()
 
 def _record_sent(now: float | None = None) -> None:
     _hourly_sent.append(now if now is not None else time.time())
-
+    _save_state()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 실제 HTTP 발송
@@ -172,10 +230,11 @@ def evaluate_event(row: dict[str, Any], *, mark_cooldown: bool = False) -> dict[
         "session_allows_alert": session.upper() == "REGULAR",
     }
     checks["cooldown_allows_alert"] = (
-        _should_send(symbol, event_type, mark=mark_cooldown)
+        _should_send(symbol, event_type, level, mark=mark_cooldown)
         if checks["has_symbol"] and checks["has_event_type"]
         else False
     )
+    checks["daily_cap_ok"] = _daily_check(symbol)
     checks["hourly_cap_ok"] = _global_hourly_check()
 
     would_send = all(checks.values())
@@ -203,23 +262,23 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
 
     result = evaluate_event(row, mark_cooldown=False)
 
-    logger.info(
-        "would_send_telegram",
-        symbol=result["symbol"],
-        name=result["name"],
-        event_level=result["event_level"],
-        event_type=result["event_type"],
-        session_status=result["session_status"],
-        would_send_telegram=result["would_send_telegram"],
-        blocked_by=result["blocked_by"],
-        blocked_reason=result["blocked_by"][0] if result["blocked_by"] else "",
-        dry_run=effective_dry_run,
-    )
-
     if not result["would_send_telegram"]:
+        reason = result["blocked_by"][0] if result["blocked_by"] else "unknown"
+        if reason == "cooldown_allows_alert":
+            logger.info("telegram_skip", reason="cooldown", symbol=result["symbol"], event_type=result["event_type"])
+        elif reason == "daily_cap_ok":
+            logger.info("telegram_skip", reason="daily_limit", symbol=result["symbol"], event_type=result["event_type"])
+        elif reason == "hourly_cap_ok":
+            logger.info("telegram_skip", reason="hourly_limit", symbol=result["symbol"], event_type=result["event_type"])
+        else:
+            logger.info("telegram_skip", reason=reason, symbol=result["symbol"], event_type=result["event_type"])
         return result
 
     if effective_dry_run:
+        symbol = str(row.get("symbol") or row.get("code") or "")
+        event_type = str(row.get("event_type") or "")
+        _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
+        _record_sent()
         logger.info(
             "telegram_dry_run_would_send",
             symbol=result["symbol"],
@@ -232,7 +291,7 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
     # 쿨다운 마킹 (발송 직전에 찍어야 중복 방지)
     symbol = str(row.get("symbol") or row.get("code") or "")
     event_type = str(row.get("event_type") or "")
-    _should_send(symbol, event_type, mark=True)
+    _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
     _record_sent()
 
     text = _build_alphaforge_message(result, row)
@@ -324,7 +383,7 @@ async def maybe_send_index_alert(
         )
         return result
 
-    if not _should_send(key_symbol, key_event, mark=False, cooldown_sec=_INDEX_COOLDOWN_SEC):
+    if not _should_send(key_symbol, key_event, '', mark=False, cooldown_sec=_INDEX_COOLDOWN_SEC):
         result["blocked_reason"] = "index_cooldown_15m"
         logger.info(
             "would_send_telegram",
@@ -365,7 +424,7 @@ async def maybe_send_index_alert(
         return result
 
     # 실발송
-    _should_send(key_symbol, key_event, mark=True, cooldown_sec=_INDEX_COOLDOWN_SEC)
+    _should_send(key_symbol, key_event, '', mark=True, cooldown_sec=_INDEX_COOLDOWN_SEC)
     _record_sent()
     text = _build_index_message(index_name, change_pct, price, direction)
     sent = await _send_message(text)
@@ -413,13 +472,13 @@ async def send_test_message() -> dict[str, Any]:
         return result
 
     # 중복 방지 (쿨다운 재사용)
-    if not _should_send("__test__", "TEST", mark=False, cooldown_sec=3600):
+    if not _should_send("__test__", "TEST", '', mark=False, cooldown_sec=3600):
         result["error"] = "test_already_sent_within_1h"
         result["skipped"] = True
         return result
 
     _test_sent_flag = True
-    _should_send("__test__", "TEST", mark=True, cooldown_sec=3600)
+    _should_send("__test__", "TEST", '', mark=True, cooldown_sec=3600)
     _record_sent()
 
     text = (
