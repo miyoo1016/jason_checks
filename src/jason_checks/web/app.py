@@ -45,7 +45,12 @@ from jason_checks.alphaforge_candidates import (
 from jason_checks.signal_journal import save_signal_journal, build_signal_rows
 from jason_checks.decision_engine import run_decision_engine
 from jason_checks.signal_journal import get_session_status
-from jason_checks.telegram_notifier import maybe_send_event, telegram_enabled
+from jason_checks.telegram_notifier import (
+    maybe_send_event,
+    maybe_send_index_alert,
+    send_test_message,
+    telegram_enabled,
+)
 
 # Initialize logging
 setup_logging()
@@ -380,7 +385,7 @@ async def _signal_journal_loop(app):
 
 
 async def _telegram_alert_loop(app):
-    """Dry-run Telegram alert scan for AlphaForge candidates."""
+    """AlphaForge Telegram alert scan (dry-run or real, per env flag)."""
     await asyncio.sleep(5)
     while True:
         try:
@@ -388,25 +393,53 @@ async def _telegram_alert_loop(app):
             results = []
             for row in rows:
                 try:
-                    results.append(await maybe_send_event(row, dry_run=True))
+                    # dry_run=None → telegram_notifier가 KR_TELEGRAM_DRY_RUN env로 결정
+                    results.append(await maybe_send_event(row, dry_run=None))
                 except Exception as e:
-                    logger.warning("telegram_dry_run_row_failed", error=str(e))
+                    logger.warning("telegram_alert_row_failed", error=str(e))
             would_send_count = sum(1 for item in results if item.get("would_send_telegram"))
             session_blocked_count = sum(
                 1 for item in results
                 if "session_allows_alert" in item.get("blocked_by", [])
             )
+            import os
+            dry_run_flag = os.environ.get("KR_TELEGRAM_DRY_RUN", "true").lower() not in ("false", "0", "no")
             logger.info(
-                "telegram_alert_loop_dry_run",
+                "telegram_alert_loop_cycle",
                 rows=len(rows),
                 credentials_present=telegram_enabled(),
                 would_send_telegram=would_send_count,
                 session_blocked=session_blocked_count,
-                dry_run=True,
+                dry_run=dry_run_flag,
             )
         except Exception as e:
             logger.warning("telegram_loop_error", error=str(e))
         await asyncio.sleep(30)
+
+
+async def _index_alert_loop(app):
+    """KOSPI/KOSDAQ 급등락 Telegram 알람 루프. 15분 쿨다운 내장."""
+    await asyncio.sleep(15)  # 지수 polling이 먼저 뜰 때까지 대기
+    while True:
+        try:
+            for code, idx in list(app_state.indices.items()):
+                name = getattr(idx, "name", code) or code
+                chg = float(getattr(idx, "change_pct", 0) or 0)
+                price = float(getattr(idx, "price", 0) or 0)
+                if price > 0 and abs(chg) >= 0.1:  # 0 방어
+                    try:
+                        await maybe_send_index_alert(
+                            index_code=code,
+                            index_name=name,
+                            change_pct=chg,
+                            price=price,
+                            threshold_pct=3.0,
+                        )
+                    except Exception as e:
+                        logger.warning("index_alert_error", code=code, error=str(e))
+        except Exception as e:
+            logger.warning("index_alert_loop_error", error=str(e))
+        await asyncio.sleep(60)
 
 
 def create_app() -> FastAPI:
@@ -515,6 +548,7 @@ def create_app() -> FastAPI:
         asyncio.create_task(run_selective_supply_poller(app, app_state))
         asyncio.create_task(_signal_journal_loop(app))
         asyncio.create_task(_telegram_alert_loop(app))
+        asyncio.create_task(_index_alert_loop(app))
 
     @app.on_event("shutdown")
     async def shutdown():
@@ -1004,6 +1038,14 @@ def create_app() -> FastAPI:
             "alphaforge_export_count": alphaforge_export_stats["exported_count"],
             "alphaforge_export_stats": alphaforge_export_stats,
         }
+
+    @app.post("/api/telegram-test")
+    async def telegram_test():
+        """CHECKS Telegram 테스트 메시지 1회 발송 (프로세스당 1회, 쿨다운 1h)."""
+        result = await send_test_message()
+        if result.get("error"):
+            return JSONResponse({"ok": False, **result}, status_code=400)
+        return {"ok": True, **result}
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
