@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
+import json
+import time
 from typing import Dict
 from collections import deque
 
@@ -40,6 +43,7 @@ class StockState:
     volume_history: deque = field(default_factory=lambda: deque(maxlen=5))
     surge_active: bool = False
     last_surge_ts: datetime = field(default_factory=datetime.now)
+    sparkline_points: Dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -55,6 +59,7 @@ class IndexState:
     investor_institution: int = 0
     investor_individual: int = 0
     updated_ts: datetime = field(default_factory=datetime.now)
+    sparkline_points: Dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +72,54 @@ class AppState:
     ws_connected: bool = False
     rest_ok: bool = False
     current_rest_rps: float = 0.0
+    _sparkline_dirty: bool = False
+    _sparkline_last_save: float = 0.0
+
+    def load_sparkline_history(self):
+        try:
+            path = "data/runtime/intraday_sparkline.json"
+            if not os.path.exists(path): return
+            with open(path, "r") as f:
+                data = json.load(f)
+            now = datetime.now()
+            if data.get("date") != now.strftime("%Y-%m-%d"): return
+            today_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            cutoff_ms = int(today_9am.timestamp() * 1000)
+            if now < today_9am: return
+
+            for code, points in data.get("stocks", {}).items():
+                stock = self.get_or_create_stock(code)
+                for t, p in points:
+                    if t >= cutoff_ms: stock.sparkline_points[t] = p
+
+            for code, points in data.get("indices", {}).items():
+                idx = self.get_or_create_index(code)
+                for t, p in points:
+                    if t >= cutoff_ms: idx.sparkline_points[t] = p
+        except Exception as e:
+            print(f"Failed to load sparkline: {e}")
+
+    def save_sparkline_history(self, force: bool = False):
+        if not self._sparkline_dirty and not force: return
+        now_ts = time.time()
+        if not force and now_ts - self._sparkline_last_save < 30: return
+
+        try:
+            path = "data/runtime/intraday_sparkline.json"
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "stocks": {code: [[t, p] for t, p in sorted(st.sparkline_points.items())] for code, st in self.stocks.items() if st.sparkline_points},
+                "indices": {code: [[t, p] for t, p in sorted(idx.sparkline_points.items())] for code, idx in self.indices.items() if idx.sparkline_points}
+            }
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+            self._sparkline_dirty = False
+            self._sparkline_last_save = now_ts
+        except Exception as e:
+            print(f"Failed to save sparkline: {e}")
 
     def get_or_create_stock(self, code: str) -> StockState:
         """Get or create stock state."""
@@ -86,6 +139,24 @@ class AppState:
                 setattr(stock, key, value)
         stock.last_tick_ts = datetime.now()
 
+        if "price" in kwargs:
+            p = float(kwargs["price"])
+            if p > 0:
+                now = datetime.now()
+                today_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                if now >= today_9am:
+                    # 9시 이전 데이터 삭제
+                    keys_to_del = [k for k in stock.sparkline_points.keys() if k < int(today_9am.timestamp() * 1000)]
+                    for k in keys_to_del:
+                        del stock.sparkline_points[k]
+
+                    ts = int(now.timestamp() * 1000)
+                    bucket = (ts // 300000) * 300000
+                    if stock.sparkline_points.get(bucket) != p:
+                        stock.sparkline_points[bucket] = p
+                        self._sparkline_dirty = True
+                        self.save_sparkline_history()
+
     def get_or_create_index(self, code: str, name: str = "") -> "IndexState":
         """Get or create index state."""
         if code not in self.indices:
@@ -98,6 +169,23 @@ class AppState:
             if hasattr(idx, k):
                 setattr(idx, k, v)
         idx.updated_ts = datetime.now()
+
+        if "price" in kwargs:
+            p = float(kwargs["price"])
+            if p > 0:
+                now = datetime.now()
+                today_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                if now >= today_9am:
+                    keys_to_del = [k for k in idx.sparkline_points.keys() if k < int(today_9am.timestamp() * 1000)]
+                    for k in keys_to_del:
+                        del idx.sparkline_points[k]
+
+                    ts = int(now.timestamp() * 1000)
+                    bucket = (ts // 300000) * 300000
+                    if idx.sparkline_points.get(bucket) != p:
+                        idx.sparkline_points[bucket] = p
+                        self._sparkline_dirty = True
+                        self.save_sparkline_history()
 
 
 # Global singleton (used throughout the app)

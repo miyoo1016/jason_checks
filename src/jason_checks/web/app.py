@@ -534,6 +534,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup():
         logger.info("app_startup")
+        app_state.load_sparkline_history()
         if not hasattr(app, "theme_data"):
             logger.error("startup_failed_no_theme_data")
             return
@@ -715,6 +716,11 @@ def create_app() -> FastAPI:
                 "supply_date": stock.supply_date,
                 "supply_error": stock.supply_error,
                 "updated_at": stock.last_tick_ts.isoformat(),
+                "sparkline": {
+                    "status": "OK" if len(stock.sparkline_points) >= 2 else "collecting",
+                    "points": [{"t": t, "p": p} for t, p in sorted(stock.sparkline_points.items())],
+                    "baseline": stock.price / (1 + stock.change_pct / 100) if stock.change_pct > -99.9 and stock.price > 0 else stock.price,
+                } if stock.sparkline_points else None
             }
 
         themes_result = {}
@@ -1043,6 +1049,11 @@ def create_app() -> FastAPI:
                 "investor_foreigner": idx.investor_foreigner,
                 "investor_institution": idx.investor_institution,
                 "investor_individual": idx.investor_individual,
+                "sparkline": {
+                    "status": "OK" if len(idx.sparkline_points) >= 2 else "collecting",
+                    "points": [{"t": t, "p": p} for t, p in sorted(idx.sparkline_points.items())],
+                    "baseline": idx.price / (1 + idx.change_pct / 100) if idx.change_pct > -99.9 and idx.price > 0 else idx.price,
+                } if idx.sparkline_points else None
             }
         return {"indices": result}
 
