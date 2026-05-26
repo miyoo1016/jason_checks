@@ -10,6 +10,9 @@
 
     <!-- Custom CSS (Theme) -->
     <link rel="stylesheet" href="/static/css/checks.css">
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
 </head>
 <body>
     <div id="app" x-data="timaApp()" x-init="init()">
@@ -221,6 +224,22 @@
                                   x-text="supplyPollingText()"></span>
                         </div>
                     </div>
+
+
+                    <!-- Telegram Monitor Summary -->
+                    <template x-if="telegramStatus && market === 'KR'">
+                        <div class="mb-3 rounded border border-[#2AABEE]/30 bg-white/80 shadow-sm px-3 py-1.5 flex flex-wrap items-center justify-between gap-3 text-[10.5px]">
+                            <div class="flex items-center gap-2 font-bold">
+                                <span class="text-[#1E7FA6]"><svg class="w-3.5 h-3.5 inline mr-1" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.19-.08-.05-.19-.02-.27 0-.11.03-1.84 1.18-5.22 3.47-.49.34-.94.51-1.34.5-.44-.01-1.28-.24-1.9-.45-.77-.25-1.38-.38-1.33-.8.03-.22.34-.44.93-.68 3.65-1.59 6.09-2.65 7.32-3.15 3.48-1.42 4.2-1.68 4.67-1.69.1 0 .34.02.49.14.12.1.15.24.16.35-.01.07-.02.16-.03.31z"/></svg>Telegram</span>
+                                <span class="px-1.5 py-0.5 rounded text-white text-[9px]" :class="telegramStatus.enabled ? 'bg-green-500' : 'bg-red-500'" x-text="telegramStatus.enabled ? 'ON' : 'OFF'"></span>
+                                <template x-if="telegramStatus.dry_run"><span class="px-1.5 py-0.5 rounded bg-amber-500 text-white text-[9px]">DRY_RUN</span></template>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2">발송/스킵: <span class="text-[#1E7FA6]" x-text="telegramStatus.sent_today_count"></span> / <span class="text-slate-400" x-text="telegramStatus.skipped_today_count"></span></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2">오류: <span class="text-red-500" x-text="telegramStatus.failed_today_count"></span></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2">마지막: <span class="text-slate-700" x-text="telegramStatus.last_sent_at ? new Date(telegramStatus.last_sent_at).toLocaleTimeString('ko-KR') : '-'"></span></span>
+                            </div>
+                            <button @click.prevent.stop="showTelegramMonitor = true" class="px-2.5 py-1 rounded bg-[#2AABEE]/10 text-[#1E7FA6] hover:bg-[#2AABEE]/20 transition-colors font-bold border border-[#2AABEE]/30">전송내역 보기</button>
+                        </div>
+                    </template>
 
                     <!-- Forward Test Evaluator Dashboard Card (Retrospective Verification v1) -->
                     <div class="mb-3 rounded-lg border border-purple-200 bg-purple-50/10 shadow-sm p-3.5">
@@ -688,6 +707,83 @@
             <div x-show="currentTab === 'dashboard' && !marketOpen()" class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-800 text-xs font-bold text-center mb-6 shadow-sm">
                 ⚠ 실시간 데이터 수신 대기 중 — 장중에 데이터가 실시간으로 갱신됩니다
             </div>
+
+            <!-- Telegram Monitor Modal -->
+            <div x-show="showTelegramMonitor && telegramStatus"
+                 x-cloak
+                 class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+                 @click.self="showTelegramMonitor = false"
+                 @keydown.escape.window="showTelegramMonitor = false">
+                <div class="bg-slate-50 rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col border border-slate-200">
+                    <!-- Modal Header -->
+                    <div class="flex items-center justify-between p-3.5 border-b border-slate-200 bg-white rounded-t-xl">
+                        <div class="flex items-center gap-2 text-sm font-black text-[#1E7FA6]">
+                            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.19-.08-.05-.19-.02-.27 0-.11.03-1.84 1.18-5.22 3.47-.49.34-.94.51-1.34.5-.44-.01-1.28-.24-1.9-.45-.77-.25-1.38-.38-1.33-.8.03-.22.34-.44.93-.68 3.65-1.59 6.09-2.65 7.32-3.15 3.48-1.42 4.2-1.68 4.67-1.69.1 0 .34.02.49.14.12.1.15.24.16.35-.01.07-.02.16-.03.31z"/></svg>
+                            <span>Telegram 전송 내역</span>
+                            <div class="ml-2 flex items-center gap-1.5 text-[10px]">
+                                <span class="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600" x-text="'MODE: ' + telegramStatus.mode"></span>
+                                <span class="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600" x-text="'MIN: ' + telegramStatus.min_level"></span>
+                            </div>
+                        </div>
+                        <button @click="showTelegramMonitor = false" class="text-slate-400 hover:text-slate-600 p-1">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <!-- Modal Body (Table) -->
+                    <div class="p-3 overflow-y-auto flex-1 bg-white rounded-b-xl">
+                        <div class="rounded border border-slate-200 overflow-hidden text-[11px]">
+                            <table class="w-full text-left">
+                                <thead class="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                                    <tr>
+                                        <th class="px-3 py-2 font-bold">Time</th>
+                                        <th class="px-3 py-2 font-bold">Symbol</th>
+                                        <th class="px-3 py-2 font-bold">Event</th>
+                                        <th class="px-3 py-2 font-bold">Level</th>
+                                        <th class="px-3 py-2 font-bold">Result</th>
+                                        <th class="px-3 py-2 font-bold">Reason</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    <template x-for="ev in (telegramStatus.recent_events || [])" :key="ev.timestamp + ev.symbol">
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="px-3 py-1.5 text-slate-500 font-medium" x-text="new Date(ev.timestamp).toLocaleTimeString('ko-KR', {hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit'})"></td>
+                                            <td class="px-3 py-1.5 font-bold text-slate-700">
+                                                <span x-text="ev.name"></span>
+                                                <span class="text-[9px] text-slate-400 font-normal ml-1" x-text="ev.symbol"></span>
+                                            </td>
+                                            <td class="px-3 py-1.5 font-medium text-slate-600" x-text="ev.event_type"></td>
+                                            <td class="px-3 py-1.5">
+                                                <span class="px-1.5 py-0.5 rounded-sm font-bold text-[9px]"
+                                                        :class="{
+                                                        'bg-red-100 text-red-700': ev.event_level === 'RISK',
+                                                        'bg-blue-100 text-blue-700': ev.event_level === 'L3',
+                                                        'bg-amber-100 text-amber-700': ev.event_level === 'L2',
+                                                        'bg-slate-100 text-slate-600': ev.event_level === 'L1' || !ev.event_level
+                                                        }" x-text="ev.event_level || '-'"></span>
+                                            </td>
+                                            <td class="px-3 py-1.5">
+                                                <span class="px-2 py-0.5 rounded font-black text-[9.5px]"
+                                                        :class="{
+                                                        'bg-green-500 text-white': ev.result === 'sent',
+                                                        'bg-slate-300 text-slate-600': ev.result === 'skipped',
+                                                        'bg-red-500 text-white': ev.result === 'failed',
+                                                        'bg-amber-500 text-white': ev.result === 'dry_run'
+                                                        }"
+                                                        x-text="ev.result === 'sent' ? 'SENT' : ev.result === 'skipped' ? 'SKIP' : ev.result === 'failed' ? 'FAIL' : 'DRY'"></span>
+                                            </td>
+                                            <td class="px-3 py-1.5 text-slate-500 font-medium" x-text="ev.reason"></td>
+                                        </tr>
+                                    </template>
+                                    <template x-if="!(telegramStatus.recent_events?.length)">
+                                        <tr><td colspan="6" class="px-3 py-4 text-center text-slate-400 font-medium italic">최근 전송 내역이 없습니다.</td></tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         </main>
 
         <!-- Footer -->

@@ -1056,9 +1056,17 @@ def create_app() -> FastAPI:
     @app.get("/api/telegram/status")
     async def get_telegram_status():
         from jason_checks.telegram_notifier import (
-            get_telegram_config, _credentials_present, _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date
+            get_telegram_config, _credentials_present, _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date, _recent_events
         )
         cfg = get_telegram_config()
+
+        sent_today = len([e for e in _recent_events if e.get("result") == "sent"])
+        failed_today = len([e for e in _recent_events if e.get("result") == "failed"])
+        skipped_today = len([e for e in _recent_events if e.get("result") in ("skipped", "dry_run")])
+
+        last_sent = next((e.get("timestamp") for e in _recent_events if e.get("result") == "sent"), None)
+        last_error_event = next((e for e in _recent_events if e.get("result") == "failed"), None)
+
         return {
             "enabled": cfg["enabled"],
             "dry_run": cfg["dry_run"],
@@ -1069,8 +1077,15 @@ def create_app() -> FastAPI:
             "hourly_sent_count": len(_hourly_sent),
             "daily_sent": _daily_sent,
             "daily_reset_date": _daily_reset_date,
-            "eligible_events_count": len(_recent_alerts),  # approximate
-            "last_skip_reasons": [] # not fully tracked historically
+            "eligible_events_count": len(_recent_alerts),
+            "last_skip_reasons": [],
+            "recent_events": _recent_events[:20],
+            "sent_today_count": sent_today,
+            "failed_today_count": failed_today,
+            "skipped_today_count": skipped_today,
+            "last_sent_at": last_sent,
+            "last_error_at": last_error_event.get("timestamp") if last_error_event else None,
+            "last_error_reason": last_error_event.get("reason") if last_error_event else None
         }
 
     @app.get("/api/indices")

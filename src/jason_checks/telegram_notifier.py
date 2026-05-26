@@ -38,10 +38,11 @@ _recent_alerts: dict[str, float] = {}   # (symbol, event_type) → ts
 _hourly_sent: list[float] = []                       # 전역 발송 시각 목록
 _daily_sent: dict[str, int] = {}
 _daily_reset_date: str = ""
+_recent_events: list[dict[str, Any]] = []
 _STATE_FILE = "data/runtime/telegram_alert_state.json"
 
 def _load_state():
-    global _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date
+    global _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date, _recent_events
     try:
         if os.path.exists(_STATE_FILE):
             with open(_STATE_FILE, "r") as f:
@@ -50,6 +51,7 @@ def _load_state():
             _hourly_sent = d.get("hourly_sent", [])
             _daily_sent = d.get("daily_sent", {})
             _daily_reset_date = d.get("daily_reset_date", "")
+            _recent_events = d.get("recent_events", [])
     except Exception:
         pass
 
@@ -61,7 +63,8 @@ def _save_state():
                 "recent_alerts": _recent_alerts,
                 "hourly_sent": _hourly_sent,
                 "daily_sent": _daily_sent,
-                "daily_reset_date": _daily_reset_date
+                "daily_reset_date": _daily_reset_date,
+                "recent_events": _recent_events
             }, f)
     except Exception:
         pass
@@ -296,6 +299,22 @@ def evaluate_event(row: dict[str, Any], *, mark_cooldown: bool = False) -> dict[
     }
 
 
+def _record_event(row: dict[str, Any], result: str, reason: str, message: str = "") -> None:
+    event = {
+        "timestamp": int(time.time() * 1000),
+        "symbol": str(row.get("symbol") or row.get("code") or ""),
+        "name": str(row.get("name") or row.get("symbol") or ""),
+        "event_type": str(row.get("event_type") or ""),
+        "event_level": str(row.get("event_level") or ""),
+        "result": result,
+        "reason": reason,
+        "message": message
+    }
+    _recent_events.insert(0, event)
+    while len(_recent_events) > 100:
+        _recent_events.pop()
+    _save_state()
+
 async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) -> dict[str, Any]:
     """Evaluate and optionally send a Telegram alert for an AlphaForge event."""
     effective_dry_run = _is_dry_run() if dry_run is None else dry_run
@@ -304,7 +323,33 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
     if not result["would_send_telegram"]:
         reason = result["blocked_by"][0] if result["blocked_by"] else "unknown"
         logger.info("telegram_skip", reason=reason, symbol=result["symbol"], event_type=result["event_type"])
+        _record_event(row, "skipped", reason)
         return result
+
+    if effective_dry_run:
+        symbol = str(row.get("symbol") or row.get("code") or "")
+        event_type = str(row.get("event_type") or "")
+        _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
+        _record_sent()
+        logger.info("telegram_skip", reason="dry_run", symbol=result["symbol"], event_type=result["event_type"])
+        result["would_send_telegram"] = False  # To mark that it was skipped
+        _record_event(row, "dry_run", "dry_run")
+        return result
+
+    symbol = str(row.get("symbol") or row.get("code") or "")
+    event_type = str(row.get("event_type") or "")
+
+    # Actually send
+    text = _build_message(row)
+    sent_ok = await _send_message(text)
+    if sent_ok:
+        _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
+        _record_sent()
+        _record_event(row, "sent", "success")
+    else:
+        _record_event(row, "failed", "send_error")
+
+    return result
 
     if effective_dry_run:
         symbol = str(row.get("symbol") or row.get("code") or "")

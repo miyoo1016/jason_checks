@@ -29,6 +29,8 @@ function isAlphaForgeTrackingCandidate(stock) {
 function timaApp() {
     return {
         // State
+        telegramStatus: null,
+        showTelegramMonitor: false,
         themes: {},
         stocks: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
@@ -117,6 +119,11 @@ function timaApp() {
             await this.loadIndices();
             if (this.market === 'US') await this.loadUsWatchlist();
             if (this.market === 'KR') await this.loadKrSectorLeaders();
+
+
+            // Initial load for telegram status
+            this.loadTelegramStatus();
+            setInterval(() => this.loadTelegramStatus(), 5000);
 
             // Connect WebSocket
             this.connectWebSocket();
@@ -1544,6 +1551,18 @@ ${metaTextSvg}\
             else if (hhmm >= 900 && hhmm <= 1530) this.sessionType = 'regular';
             else if (hhmm > 1530 && hhmm < 2000) this.sessionType = 'after';
             else this.sessionType = 'closed';
+        },
+
+
+        async loadTelegramStatus() {
+            try {
+                const res = await fetch('/api/telegram/status');
+                if (res.ok) {
+                    this.telegramStatus = await res.json();
+                }
+            } catch (e) {
+                console.warn('Telegram status load failed:', e);
+            }
         },
 
         async loadThemes() {
