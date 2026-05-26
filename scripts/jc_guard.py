@@ -416,6 +416,124 @@ def write_incident(health: dict[str, Any], issues: list[dict[str, Any]]) -> None
     INCIDENT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _codex_prompt_scope(issues: list[dict[str, Any]]) -> dict[str, list[str]]:
+    codes = {str(issue.get("code") or "") for issue in issues}
+
+    if "SECTOR_AUDIT_WARNINGS" in codes:
+        return {
+            "allowed": [
+                "themes.yaml",
+                "scripts/validate_themes.py",
+                "data/reports/theme_validation_report.md",
+                "data/reports/theme_validation_report.json",
+            ],
+            "forbidden": [
+                "src/jason_checks/telegram_notifier.py",
+                "src/jason_checks/kis_rest.py",
+                "src/jason_checks/state.py",
+                "src/jason_checks/decision_engine.py",
+                "src/jason_checks/web/app.py",
+            ],
+            "precheck": [
+                ".venv/bin/python scripts/validate_themes.py",
+                "cat data/reports/theme_validation_report.md",
+            ],
+            "verify": [
+                ".venv/bin/python scripts/validate_themes.py",
+                "cat data/reports/theme_validation_report.md",
+                "scripts/run_jc_guard.sh --no-telegram",
+            ],
+        }
+
+    if any(code.startswith("TELEGRAM_") for code in codes):
+        return {
+            "allowed": [
+                "src/jason_checks/telegram_notifier.py",
+                "src/jason_checks/web/app.py",
+                "src/jason_checks/static/js/app.js",
+            ],
+            "forbidden": [
+                "themes.yaml",
+                "src/jason_checks/kis_rest.py",
+                "src/jason_checks/decision_engine.py",
+            ],
+            "precheck": [],
+            "verify": [
+                ".venv/bin/python -m compileall src server.py checks.py",
+                "git diff --check",
+                "scripts/run_jc_guard.sh --no-telegram",
+            ],
+        }
+
+    if any(code.startswith("INDEX_") or code.startswith("INDICES_") for code in codes):
+        return {
+            "allowed": [
+                "src/jason_checks/kis_rest.py",
+                "src/jason_checks/state.py",
+                "src/jason_checks/web/app.py",
+                "src/jason_checks/web/templates/index.html",
+            ],
+            "forbidden": [
+                "themes.yaml",
+                "src/jason_checks/telegram_notifier.py",
+            ],
+            "precheck": [],
+            "verify": [
+                ".venv/bin/python -m compileall src server.py checks.py",
+                "git diff --check",
+                "scripts/run_jc_guard.sh --no-telegram",
+            ],
+        }
+
+    if (
+        "SERVER_UNRESPONSIVE" in codes
+        or any("API_UNAVAILABLE" in code for code in codes)
+    ):
+        return {
+            "allowed": [
+                "코드 수정 금지",
+                "lsof -tiTCP:8000 -sTCP:LISTEN",
+                "tail -200 server.log",
+                "scripts/run_jc_guard.sh --repair --no-telegram",
+            ],
+            "forbidden": [
+                "모든 소스 코드 파일",
+                "themes.yaml",
+                "src/jason_checks/telegram_notifier.py",
+                "src/jason_checks/kis_rest.py",
+                "src/jason_checks/decision_engine.py",
+            ],
+            "precheck": [
+                "lsof -tiTCP:8000 -sTCP:LISTEN || true",
+                "tail -200 server.log",
+            ],
+            "verify": [
+                "scripts/run_jc_guard.sh --repair --no-telegram",
+                "curl -s http://127.0.0.1:8000/api/indices | python3 -m json.tool | head -80",
+            ],
+        }
+
+    return {
+        "allowed": [
+            "문제 원인 파일만 최소 수정",
+        ],
+        "forbidden": [
+            "대규모 리팩터링",
+            "무관한 런타임 파일",
+        ],
+        "precheck": [],
+        "verify": [
+            ".venv/bin/python -m compileall src server.py checks.py",
+            "git diff --check",
+            "scripts/run_jc_guard.sh --no-telegram",
+        ],
+    }
+
+
+def _bullet_lines(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items) if items else "- 없음"
+
+
 def write_codex_prompt(health: dict[str, Any], issues: list[dict[str, Any]]) -> None:
     if not issues:
         text = (
@@ -424,6 +542,11 @@ def write_codex_prompt(health: dict[str, Any], issues: list[dict[str, Any]]) -> 
         )
     else:
         issue_lines = "\n".join(f"- [{i['severity']}] {i['code']}: {i['summary']}" for i in issues)
+        scope = _codex_prompt_scope(issues)
+        precheck_lines = _bullet_lines(scope["precheck"])
+        allowed_lines = _bullet_lines(scope["allowed"])
+        forbidden_scope_lines = _bullet_lines(scope["forbidden"])
+        verify_lines = "\n".join(scope["verify"])
         text = f"""작업 폴더: /Users/miyoo1016/jason_checks
 
 목표:
@@ -432,14 +555,15 @@ JC Guard가 감지한 아래 문제를 최소 수정한다.
 감지 문제:
 {issue_lines}
 
+먼저 확인:
+{precheck_lines}
+
 수정 허용 파일:
-- src/jason_checks/web/app.py
-- src/jason_checks/telegram_notifier.py
-- src/jason_checks/kis_rest.py
-- src/jason_checks/state.py
-- 필요 시 관련 최소 파일 1개
+{allowed_lines}
 
 금지:
+- 아래 파일/영역 수정 금지:
+{forbidden_scope_lines}
 - 대규모 리팩터링 금지
 - 새 dependency 추가 금지
 - 자동 커밋 금지
@@ -454,9 +578,7 @@ JC Guard가 감지한 아래 문제를 최소 수정한다.
 - {HEALTH_PATH}
 
 검증:
-.venv/bin/python -m compileall src server.py checks.py
-git diff --check
-scripts/run_jc_guard.sh --no-telegram
+{verify_lines}
 """
     CODEX_PROMPT_PATH.parent.mkdir(parents=True, exist_ok=True)
     CODEX_PROMPT_PATH.write_text(text, encoding="utf-8")
