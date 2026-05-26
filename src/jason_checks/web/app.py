@@ -298,6 +298,7 @@ async def _unified_polling_loop(app):
                 update_data = {
                     "name": info["name"], "price": info["price"],
                     "change_pct": info["change_pct"], "change_value": info["change_value"],
+                    "source": info.get("source", "live"),
                 }
                 if CURRENT_MARKET == "KR":
                     inv = await fetch_index_investor_trend(code)
@@ -423,10 +424,11 @@ async def _index_alert_loop(app):
     while True:
         try:
             for code, idx in list(app_state.indices.items()):
+                source = getattr(idx, "source", "live")
                 name = getattr(idx, "name", code) or code
                 chg = float(getattr(idx, "change_pct", 0) or 0)
                 price = float(getattr(idx, "price", 0) or 0)
-                if price > 0 and abs(chg) >= 0.1:  # 0 방어
+                if source not in ("dummy", "mock") and price > 0 and abs(chg) >= 0.1:  # 0 방어
                     try:
                         await maybe_send_index_alert(
                             index_code=code,
@@ -1044,16 +1046,23 @@ def create_app() -> FastAPI:
     async def get_indices():
         result = {}
         for code, idx in app_state.indices.items():
-            result[code] = {
-                "name": idx.name, "price": idx.price, "change_pct": idx.change_pct,
-                "investor_foreigner": idx.investor_foreigner,
-                "investor_institution": idx.investor_institution,
-                "investor_individual": idx.investor_individual,
-                "sparkline": {
+            source = getattr(idx, "source", "live")
+            if source in ("dummy", "mock") or idx.price <= 0:
+                sparkline = {"status": "DATA_NA", "points": [], "baseline": 0.0}
+            else:
+                sparkline = {
                     "status": "OK" if len(idx.sparkline_points) >= 2 else "collecting",
                     "points": [{"t": t, "p": p} for t, p in sorted(idx.sparkline_points.items())],
                     "baseline": idx.price / (1 + idx.change_pct / 100) if idx.change_pct > -99.9 and idx.price > 0 else idx.price,
                 } if idx.sparkline_points else None
+
+            result[code] = {
+                "name": idx.name, "price": idx.price, "change_pct": idx.change_pct,
+                "source": source,
+                "investor_foreigner": idx.investor_foreigner,
+                "investor_institution": idx.investor_institution,
+                "investor_individual": idx.investor_individual,
+                "sparkline": sparkline
             }
         return {"indices": result}
 

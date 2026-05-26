@@ -58,6 +58,7 @@ class IndexState:
     investor_foreigner: int = 0
     investor_institution: int = 0
     investor_individual: int = 0
+    source: str = "live"            # "live" or "dummy" / "mock"
     updated_ts: datetime = field(default_factory=datetime.now)
     sparkline_points: Dict[int, float] = field(default_factory=dict)
 
@@ -172,7 +173,13 @@ class AppState:
 
         if "price" in kwargs:
             p = float(kwargs["price"])
-            if p > 0:
+            is_dummy = getattr(idx, "source", "") in ("dummy", "mock")
+            if is_dummy or p <= 0:
+                if idx.sparkline_points:
+                    idx.sparkline_points.clear()
+                    self._sparkline_dirty = True
+                    self.save_sparkline_history()
+            else:
                 now = datetime.now()
                 today_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
                 if now >= today_9am:

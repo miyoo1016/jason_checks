@@ -400,6 +400,28 @@ INDEX_CODES = {
 }
 
 
+async def fetch_naver_index(code: str) -> dict:
+    """Fallback fetch from Naver Finance for indices."""
+    naver_code = "KOSPI" if code == "0001" else "KOSDAQ"
+    url = f"https://m.stock.naver.com/api/index/{naver_code}/basic"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with httpx.AsyncClient(verify=False) as client:
+        resp = await client.get(url, headers=headers, timeout=3.0)
+        resp.raise_for_status()
+        data = resp.json()
+        price = float(data["closePrice"].replace(",", ""))
+        chg_val = float(data["compareToPreviousClosePrice"].replace(",", ""))
+        chg_pct = float(data["fluctuationsRatio"].replace(",", ""))
+        if data.get("compareToPreviousPrice", {}).get("code") == "5":
+            chg_val = -chg_val
+            chg_pct = -chg_pct
+        return {
+            "price": price,
+            "change_pct": chg_pct,
+            "change_value": chg_val
+        }
+
+
 async def fetch_market_indices(market: str = "KR") -> dict:
     """Fetch index snapshot (KR or US).
 
@@ -436,14 +458,18 @@ async def fetch_market_indices(market: str = "KR") -> dict:
             # HHDFS76200200 uses SYMB for code
             params = {"AUTH": "", "EXCD": excd, "SYMB": code}
 
+        source = "live"
+        if market == "KR" and code == "0001" and settings.kis_mode == "paper":
+            source = "dummy"
+
         try:
             async with httpx.AsyncClient(verify=False) as client:
                 resp = await client.get(url, headers=headers, params=params, timeout=5.0)
-                if resp.status_code != 200: continue
+                if resp.status_code != 200:
+                    raise Exception(f"HTTP status {resp.status_code}")
                 data = resp.json()
                 if data.get("rt_cd") != "0":
-                    logger.warning("index_api_error", code=code, msg=data.get("msg1", ""))
-                    continue
+                    raise Exception(f"API error: {data.get('msg1', '')}")
                 out = data.get("output", {})
 
                 if market == "KR":
@@ -455,17 +481,44 @@ async def fetch_market_indices(market: str = "KR") -> dict:
                     chg_pct = float(out.get("rate", 0) or 0)
                     chg_val = float(out.get("diff", 0) or 0)
 
+                # If KOSPI price is dummy (exceeds 5000)
+                if market == "KR" and code == "0001" and price > 5000:
+                    source = "dummy"
+
+                if source == "dummy" and market == "KR" and code in ["0001", "1001"]:
+                    try:
+                        fallback_data = await fetch_naver_index(code)
+                        # 절대 KOSPI 8000대 더미값 표시 금지
+                        if code == "0001" and fallback_data["price"] > 5000:
+                            raise Exception("Fallback price is also a dummy/8000+ value")
+                        price = fallback_data["price"]
+                        chg_pct = fallback_data["change_pct"]
+                        chg_val = fallback_data["change_value"]
+                        source = "public"
+                    except Exception as fallback_e:
+                        logger.warning("fallback_index_failed", code=code, error=str(fallback_e))
+
                 if price > 0:
                     results[code] = {
                         "name": name,
-                        "price": price,
-                        "change_pct": chg_pct,
-                        "change_value": chg_val,
+                        "price": price if source != "dummy" else 0.0,
+                        "change_pct": chg_pct if source != "dummy" else 0.0,
+                        "change_value": chg_val if source != "dummy" else 0.0,
+                        "source": source,
                     }
             # Important: Sleep to avoid EGW00201 on the next iteration
             await asyncio.sleep(1.0)
         except Exception as e:
             logger.warning("index_exception", code=code, error=str(e))
+            if market == "KR" and code == "0001":
+                # KOSPI 실제 지수 조회 실패 시 더미값 대신 DATA_NA/실패로 처리할 수 있도록 결과 반환
+                results[code] = {
+                    "name": name,
+                    "price": 0.0,
+                    "change_pct": 0.0,
+                    "change_value": 0.0,
+                    "source": "dummy",
+                }
             await asyncio.sleep(1.0)
 
     return results

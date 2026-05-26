@@ -45,6 +45,8 @@ def _assess_market_gate(indices: dict[str, Any]) -> dict[str, Any]:
 
     pcts = []
     for idx in indices.values():
+        if idx.get("source") in ("dummy", "mock") or float(idx.get("price") or 0) <= 0:
+            continue
         pct = float(idx.get("change_pct") or 0)
         pcts.append(pct)
 
