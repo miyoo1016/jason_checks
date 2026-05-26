@@ -99,6 +99,21 @@ def _get_credentials() -> tuple[str, str]:
     return token, chat
 
 
+from dotenv import load_dotenv
+load_dotenv()
+
+
+def _parse_bool(val: str | None, default: bool) -> bool:
+    if val is None or str(val).strip() == "":
+        return default
+    v = str(val).lower().strip()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def _credentials_present() -> bool:
     token, chat = _get_credentials()
     return bool(token) and bool(chat)
@@ -111,14 +126,12 @@ def telegram_enabled() -> bool:
 
 def _is_enabled() -> bool:
     """KR_TELEGRAM_ENABLED=true 이어야 활성."""
-    val = os.environ.get("KR_TELEGRAM_ENABLED", "").lower()
-    return val in ("true", "1", "yes")
+    return _parse_bool(os.environ.get("KR_TELEGRAM_ENABLED"), False)
 
 
 def _is_dry_run() -> bool:
     """KR_TELEGRAM_DRY_RUN=false 일 때만 실발송. 기본값 true(안전 우선)."""
-    val = os.environ.get("KR_TELEGRAM_DRY_RUN", "true").lower()
-    return val not in ("false", "0", "no")
+    return _parse_bool(os.environ.get("KR_TELEGRAM_DRY_RUN"), True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

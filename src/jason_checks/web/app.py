@@ -404,14 +404,21 @@ async def _telegram_alert_loop(app):
                 if "session_allows_alert" in item.get("blocked_by", [])
             )
             import os
-            dry_run_flag = os.environ.get("KR_TELEGRAM_DRY_RUN", "true").lower() not in ("false", "0", "no")
+            from jason_checks.telegram_notifier import _is_enabled, _is_dry_run
+            enabled_flag = _is_enabled()
+            dry_run_flag = _is_dry_run()
+            min_level = os.environ.get("KR_TELEGRAM_MIN_LEVEL", "L2")
+            mode = os.environ.get("KR_TELEGRAM_MODE", "instant")
             logger.info(
                 "telegram_alert_loop_cycle",
                 rows=len(rows),
                 credentials_present=telegram_enabled(),
                 would_send_telegram=would_send_count,
                 session_blocked=session_blocked_count,
+                enabled=enabled_flag,
                 dry_run=dry_run_flag,
+                min_level=min_level,
+                mode=mode,
             )
         except Exception as e:
             logger.warning("telegram_loop_error", error=str(e))

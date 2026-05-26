@@ -488,13 +488,10 @@ async def fetch_market_indices(market: str = "KR") -> dict:
                 if source == "dummy" and market == "KR" and code in ["0001", "1001"]:
                     try:
                         fallback_data = await fetch_naver_index(code)
-                        # 절대 KOSPI 8000대 더미값 표시 금지
-                        if code == "0001" and fallback_data["price"] > 5000:
-                            raise Exception("Fallback price is also a dummy/8000+ value")
                         price = fallback_data["price"]
                         chg_pct = fallback_data["change_pct"]
                         chg_val = fallback_data["change_value"]
-                        source = "public"
+                        source = "naver"
                     except Exception as fallback_e:
                         logger.warning("fallback_index_failed", code=code, error=str(fallback_e))
 
