@@ -71,6 +71,36 @@ _load_state()
 
 # ── 설정 상수 ─────────────────────────────────────────────────────────────────
 
+
+def get_telegram_config() -> dict:
+    return {
+        "enabled": _is_enabled(),
+        "dry_run": _is_dry_run(),
+        "mode": os.environ.get("KR_TELEGRAM_MODE", "instant"),
+        "min_level": os.environ.get("KR_TELEGRAM_MIN_LEVEL", "L2"),
+        "open_mute_minutes": int(os.environ.get("KR_TELEGRAM_OPEN_MUTE_MINUTES", "5")),
+        "daily_max_per_symbol": _get_daily_max_per_symbol(),
+        "global_max_per_hour": _get_max_per_hour(),
+        "muted_codes": [c.strip() for c in os.environ.get("KR_TELEGRAM_MUTED_CODES", "").split(",") if c.strip()],
+    }
+
+def telegram_healthcheck() -> None:
+    cfg = get_telegram_config()
+    logger.info(
+        "telegram_healthcheck",
+        env_loaded="KR_TELEGRAM_ENABLED" in os.environ,
+        enabled=cfg["enabled"],
+        dry_run=cfg["dry_run"],
+        mode=cfg["mode"],
+        min_level=cfg["min_level"],
+        credentials_present=_credentials_present(),
+        state_file_exists=os.path.exists(_STATE_FILE),
+        daily_reset_date=_daily_reset_date,
+        today=datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d"),
+        daily_state_reset_needed=(_daily_reset_date != datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d")),
+    )
+
+
 def _get_max_per_hour() -> int:
     try: return int(os.environ.get("KR_TELEGRAM_GLOBAL_MAX_PER_HOUR", 10))
     except ValueError: return 10
@@ -139,12 +169,16 @@ def _is_dry_run() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _check_daily_reset(now: float | None = None) -> None:
-    global _daily_sent, _daily_reset_date
+    global _daily_sent, _daily_reset_date, _recent_alerts, _hourly_sent
     now_ts = now if now is not None else time.time()
     today = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
     if _daily_reset_date != today:
         _daily_sent.clear()
+        cutoff = now_ts - 86400
+        _recent_alerts = {k: v for k, v in _recent_alerts.items() if v >= cutoff}
+        _hourly_sent = [v for v in _hourly_sent if v >= cutoff]
         _daily_reset_date = today
+        _save_state()
 
 def _should_send(
     symbol: str,
@@ -212,9 +246,10 @@ async def _send_message(text: str) -> bool:
         else:
             # 오류 코드만 기록, 응답 body에 token 없으므로 안전
             logger.warning(
-                "telegram_send_failed",
+                "telegram_send_error",
                 status=resp.status_code,
                 error_code=resp.json().get("error_code"),
+                description=resp.json().get("description", "")
             )
         return ok
     except Exception as e:
@@ -233,59 +268,64 @@ def evaluate_event(row: dict[str, Any], *, mark_cooldown: bool = False) -> dict[
     level = str(row.get("event_level") or "")
     session = str(row.get("session_status") or "")
 
-    checks = {
-        "credentials_present": telegram_enabled(),
-        "system_enabled": _is_enabled(),
-        "event_should_alert": bool(row.get("event_should_alert")),
-        "level_allowed": level in ("L2", "L3", "RISK"),
-        "has_symbol": bool(symbol),
-        "has_event_type": bool(event_type),
-        "session_allows_alert": session.upper() == "REGULAR",
-    }
-    checks["cooldown_allows_alert"] = (
-        _should_send(symbol, event_type, level, mark=mark_cooldown)
-        if checks["has_symbol"] and checks["has_event_type"]
-        else False
-    )
-    checks["daily_cap_ok"] = _daily_check(symbol)
-    checks["hourly_cap_ok"] = _global_hourly_check()
+    def _get_blocked_by() -> list[str]:
+        if not _is_enabled(): return ["disabled"]
+        if not telegram_enabled(): return ["no_credentials"]
+        cfg = get_telegram_config()
+        min_level = cfg["min_level"].upper()
+        allowed = ["RISK"] if min_level == "RISK" else ["L3", "RISK"] if min_level == "L3" else ["L2", "L3", "RISK"]
+        if level not in allowed: return ["below_min_level"]
+        if symbol in cfg["muted_codes"]: return ["muted_symbol"]
+        if session.upper() != "REGULAR": return ["session_blocked"]
+        if not _should_send(symbol, event_type, level, mark=mark_cooldown): return ["cooldown"]
+        if not _daily_check(symbol): return ["daily_max"]
+        if not _global_hourly_check(): return ["global_hourly_max"]
+        return []
 
-    would_send = all(checks.values())
-    blocked_by = [key for key, ok in checks.items() if not ok]
+    blocked_by = _get_blocked_by()
+
     return {
         "symbol": symbol,
         "name": row.get("name") or symbol,
         "event_level": level,
         "event_type": event_type,
         "session_status": session,
-        "would_send_telegram": would_send,
+        "would_send_telegram": len(blocked_by) == 0,
         "dry_run": _is_dry_run(),
         "blocked_by": blocked_by,
     }
 
 
 async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) -> dict[str, Any]:
-    """Evaluate and optionally send a Telegram alert for an AlphaForge event.
-
-    dry_run precedence:
-      1. explicit argument (if not None)
-      2. KR_TELEGRAM_DRY_RUN env var (default true)
-    """
+    """Evaluate and optionally send a Telegram alert for an AlphaForge event."""
     effective_dry_run = _is_dry_run() if dry_run is None else dry_run
-
     result = evaluate_event(row, mark_cooldown=False)
 
     if not result["would_send_telegram"]:
         reason = result["blocked_by"][0] if result["blocked_by"] else "unknown"
-        if reason == "cooldown_allows_alert":
-            logger.info("telegram_skip", reason="cooldown", symbol=result["symbol"], event_type=result["event_type"])
-        elif reason == "daily_cap_ok":
-            logger.info("telegram_skip", reason="daily_limit", symbol=result["symbol"], event_type=result["event_type"])
-        elif reason == "hourly_cap_ok":
-            logger.info("telegram_skip", reason="hourly_limit", symbol=result["symbol"], event_type=result["event_type"])
-        else:
-            logger.info("telegram_skip", reason=reason, symbol=result["symbol"], event_type=result["event_type"])
+        logger.info("telegram_skip", reason=reason, symbol=result["symbol"], event_type=result["event_type"])
         return result
+
+    if effective_dry_run:
+        symbol = str(row.get("symbol") or row.get("code") or "")
+        event_type = str(row.get("event_type") or "")
+        _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
+        _record_sent()
+        logger.info("telegram_skip", reason="dry_run", symbol=result["symbol"], event_type=result["event_type"])
+        result["would_send_telegram"] = False  # To mark that it was skipped
+        return result
+
+    symbol = str(row.get("symbol") or row.get("code") or "")
+    event_type = str(row.get("event_type") or "")
+
+    # Actually send
+    text = _build_message(row)
+    sent_ok = await _send_message(text)
+    if sent_ok:
+        _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
+        _record_sent()
+
+    return result
 
     if effective_dry_run:
         symbol = str(row.get("symbol") or row.get("code") or "")

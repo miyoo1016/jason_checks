@@ -543,6 +543,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup():
         logger.info("app_startup")
+
+        from jason_checks.telegram_notifier import telegram_healthcheck
+        telegram_healthcheck()
+
         app_state.load_sparkline_history()
         if not hasattr(app, "theme_data"):
             logger.error("startup_failed_no_theme_data")
@@ -1048,6 +1052,26 @@ def create_app() -> FastAPI:
             session=session_now,
         )
         return summary
+
+    @app.get("/api/telegram/status")
+    async def get_telegram_status():
+        from jason_checks.telegram_notifier import (
+            get_telegram_config, _credentials_present, _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date
+        )
+        cfg = get_telegram_config()
+        return {
+            "enabled": cfg["enabled"],
+            "dry_run": cfg["dry_run"],
+            "mode": cfg["mode"],
+            "min_level": cfg["min_level"],
+            "credentials_present": _credentials_present(),
+            "recent_alerts_count": len(_recent_alerts),
+            "hourly_sent_count": len(_hourly_sent),
+            "daily_sent": _daily_sent,
+            "daily_reset_date": _daily_reset_date,
+            "eligible_events_count": len(_recent_alerts),  # approximate
+            "last_skip_reasons": [] # not fully tracked historically
+        }
 
     @app.get("/api/indices")
     async def get_indices():
