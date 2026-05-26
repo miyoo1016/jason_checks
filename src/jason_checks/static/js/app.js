@@ -31,6 +31,8 @@ function timaApp() {
         // State
         telegramStatus: null,
         showTelegramMonitor: false,
+        guardStatus: null,
+        showGuardMonitor: false,
         themes: {},
         stocks: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
@@ -124,6 +126,8 @@ function timaApp() {
             // Initial load for telegram status
             this.loadTelegramStatus();
             setInterval(() => this.loadTelegramStatus(), 5000);
+            this.loadGuardStatus();
+            setInterval(() => this.loadGuardStatus(), 10000);
 
             // Connect WebSocket
             this.connectWebSocket();
@@ -1563,6 +1567,73 @@ ${metaTextSvg}\
             } catch (e) {
                 console.warn('Telegram status load failed:', e);
             }
+        },
+
+        async loadGuardStatus() {
+            try {
+                const res = await fetch('/api/guard/status');
+                if (res.ok) {
+                    this.guardStatus = await res.json();
+                }
+            } catch (e) {
+                console.warn('Guard status load failed:', e);
+            }
+        },
+
+        guardStatusClass(status) {
+            const s = status || this.guardStatus?.overall_status || 'NOT_RUN';
+            if (s === 'OK') return 'bg-green-500 text-white';
+            if (s === 'WARN') return 'bg-amber-500 text-white';
+            if (s === 'FAIL') return 'bg-red-600 text-white';
+            return 'bg-slate-300 text-slate-700';
+        },
+
+        guardBorderClass(status) {
+            const s = status || this.guardStatus?.overall_status || 'NOT_RUN';
+            if (s === 'OK') return 'border-green-200 bg-green-50/40';
+            if (s === 'WARN') return 'border-amber-200 bg-amber-50/50';
+            if (s === 'FAIL') return 'border-red-200 bg-red-50/50';
+            return 'border-slate-200 bg-white/80';
+        },
+
+        guardTimeText() {
+            const ts = this.guardStatus?.timestamp;
+            if (!ts) return '-';
+            try {
+                return new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+            } catch (e) {
+                return ts;
+            }
+        },
+
+        guardIssueText(limit = 2) {
+            const issues = this.guardStatus?.issues || [];
+            if (!issues.length) return this.guardStatus?.summary || '이슈 없음';
+            return issues.slice(0, limit).map(item => item.code || item.summary || String(item)).join(', ');
+        },
+
+        guardAutoRepairText() {
+            const repair = this.guardStatus?.auto_repair || {};
+            if (repair.attempted) return `auto_repair ${repair.result || 'attempted'}`;
+            return 'auto_repair off';
+        },
+
+        guardSummaryRows() {
+            const g = this.guardStatus || {};
+            const server = g.server || {};
+            const indices = g.indices || {};
+            const telegram = g.telegram || {};
+            const themes = g.themes || {};
+            const logs = g.logs || {};
+            const repair = g.auto_repair || {};
+            return [
+                { label: 'server', value: server.responding ? `OK · pid ${(server.pids || []).join(',') || '-'}` : '미응답' },
+                { label: 'indices', value: `count ${indices.count ?? '-'} · issues ${(indices.issues || []).length}` },
+                { label: 'telegram', value: `enabled ${telegram.enabled ?? '-'} · dry_run ${telegram.dry_run ?? '-'}` },
+                { label: 'themes', value: `quote ${themes.quote_load_success ?? '-'}/${themes.quote_load_total ?? '-'} · warn ${themes.sector_warning_count ?? 0}` },
+                { label: 'logs', value: `hits ${logs.hit_count ?? 0} · traceback ${logs.traceback ? 'yes' : 'no'}` },
+                { label: 'auto_repair', value: repair.attempted ? (repair.result || 'attempted') : 'not_attempted' },
+            ];
         },
 
         async loadThemes() {

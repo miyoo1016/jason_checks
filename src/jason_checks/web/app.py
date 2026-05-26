@@ -7,6 +7,7 @@ from pathlib import Path
 import structlog
 import asyncio
 import os
+import json
 from datetime import datetime
 
 from jason_checks.web.ws_bridge import get_bridge, start_bridge
@@ -59,6 +60,10 @@ logger = structlog.get_logger()
 # Active market state
 CURRENT_MARKET = "KR"
 _PRICE_FETCH_LOCK = asyncio.Lock()
+_GUARD_REPORT_DIR = Path(__file__).parent.parent.parent.parent / "data" / "reports" / "guard"
+_GUARD_HEALTH_PATH = _GUARD_REPORT_DIR / "latest_health.json"
+_GUARD_INCIDENT_PATH = _GUARD_REPORT_DIR / "latest_incident.md"
+_GUARD_CODEX_PROMPT_PATH = _GUARD_REPORT_DIR / "latest_codex_prompt.txt"
 
 
 def _normalize_symbol(code: object) -> str:
@@ -68,6 +73,55 @@ def _normalize_symbol(code: object) -> str:
     if value.isdigit() and len(value) < 6:
         value = value.zfill(6)
     return value
+
+
+def _sanitize_guard_value(value):
+    """Remove sensitive-looking keys before exposing guard reports."""
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text in {"token", "chat_id", "telegram_bot_token", "telegram_chat_id"}:
+                continue
+            if "token" in key_text or key_text.endswith("chat_id"):
+                continue
+            sanitized[key] = _sanitize_guard_value(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_guard_value(item) for item in value]
+    return value
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        logger.warning("guard_report_read_failed", path=str(path), error=str(e))
+        return ""
+
+
+def _guard_issues_from_incident(incident: str) -> list[dict]:
+    issues = []
+    for line in incident.splitlines():
+        text = line.strip()
+        if not text.startswith("- [") and not text.startswith("- ["):
+            continue
+        if "]" not in text or ":" not in text:
+            continue
+        try:
+            severity = text.split("]", 1)[0].lstrip("- [")
+            rest = text.split("]", 1)[1].strip()
+            code, summary = rest.split(":", 1)
+            issues.append({
+                "severity": severity.strip(),
+                "code": code.strip(),
+                "summary": summary.strip(),
+            })
+        except Exception:
+            continue
+    return issues
 
 
 def _theme_data_for_subscription(app: FastAPI) -> dict:
@@ -1086,6 +1140,67 @@ def create_app() -> FastAPI:
             "last_sent_at": last_sent,
             "last_error_at": last_error_event.get("timestamp") if last_error_event else None,
             "last_error_reason": last_error_event.get("reason") if last_error_event else None
+        }
+
+    @app.get("/api/guard/status")
+    async def get_guard_status():
+        """Read JC Guard report files without running or repairing guard."""
+        if not _GUARD_HEALTH_PATH.exists():
+            return {
+                "overall_status": "NOT_RUN",
+                "timestamp": None,
+                "summary": "Guard has not run yet",
+                "issues": [],
+                "health": {},
+                "server": {},
+                "indices": {},
+                "telegram": {},
+                "themes": {},
+                "logs": {},
+                "auto_repair": {},
+                "incident": "",
+                "codex_prompt": "",
+            }
+
+        try:
+            raw_health = json.loads(_GUARD_HEALTH_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("guard_health_read_failed", error=str(e))
+            raw_health = {
+                "overall_status": "FAIL",
+                "timestamp": None,
+                "server": {},
+                "indices": {},
+                "telegram": {},
+                "themes": {},
+                "logs": {},
+                "auto_repair": {},
+            }
+
+        health = _sanitize_guard_value(raw_health)
+        incident = _read_text_file(_GUARD_INCIDENT_PATH)
+        codex_prompt = _read_text_file(_GUARD_CODEX_PROMPT_PATH)
+        issues = health.get("issues") if isinstance(health.get("issues"), list) else []
+        if not issues:
+            issues = _guard_issues_from_incident(incident)
+        summary = "OK" if not issues else "; ".join(
+            str(item.get("code") or item.get("summary") or item) for item in issues[:3]
+        )
+
+        return {
+            "overall_status": health.get("overall_status", "NOT_RUN"),
+            "timestamp": health.get("timestamp"),
+            "summary": summary or "OK",
+            "issues": issues,
+            "health": health,
+            "server": health.get("server", {}),
+            "indices": health.get("indices", {}),
+            "telegram": health.get("telegram", {}),
+            "themes": health.get("themes", {}),
+            "logs": health.get("logs", {}),
+            "auto_repair": health.get("auto_repair", {}),
+            "incident": incident,
+            "codex_prompt": codex_prompt,
         }
 
     @app.get("/api/indices")

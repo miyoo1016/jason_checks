@@ -241,6 +241,21 @@
                         </div>
                     </template>
 
+                    <!-- JC Guard Summary -->
+                    <template x-if="guardStatus">
+                        <div class="mb-3 rounded border shadow-sm px-3 py-1.5 flex flex-wrap items-center justify-between gap-3 text-[10.5px]"
+                             :class="guardBorderClass(guardStatus.overall_status)">
+                            <div class="flex flex-wrap items-center gap-2 font-bold min-w-0">
+                                <span class="text-slate-700">JC Guard</span>
+                                <span class="px-1.5 py-0.5 rounded text-[9px]" :class="guardStatusClass(guardStatus.overall_status)" x-text="guardStatus.overall_status || 'NOT_RUN'"></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2">마지막: <span class="text-slate-700" x-text="guardTimeText()"></span></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2 truncate max-w-[360px]" x-text="guardIssueText(2)"></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2" x-text="guardAutoRepairText()"></span>
+                            </div>
+                            <button @click.prevent.stop="showGuardMonitor = true" class="px-2.5 py-1 rounded bg-slate-900/5 text-slate-700 hover:bg-slate-900/10 transition-colors font-bold border border-slate-300">Guard 상세</button>
+                        </div>
+                    </template>
+
                     <!-- Forward Test Evaluator Dashboard Card (Retrospective Verification v1) -->
                     <div class="mb-3 rounded-lg border border-purple-200 bg-purple-50/10 shadow-sm p-3.5">
                         <div class="flex flex-wrap items-center justify-between gap-2 border-b border-purple-100 pb-2 mb-2">
@@ -779,6 +794,65 @@
                                     </template>
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- JC Guard Monitor Modal -->
+            <div x-show="showGuardMonitor && guardStatus"
+                 x-cloak
+                 class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+                 @click.self="showGuardMonitor = false"
+                 @keydown.escape.window="showGuardMonitor = false">
+                <div class="bg-slate-50 rounded-xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col border border-slate-200">
+                    <div class="flex items-center justify-between p-3.5 border-b border-slate-200 bg-white rounded-t-xl">
+                        <div class="flex items-center gap-2 text-sm font-black text-slate-800">
+                            <span>JC Guard 상세</span>
+                            <span class="px-2 py-0.5 rounded text-[10px]" :class="guardStatusClass(guardStatus.overall_status)" x-text="guardStatus.overall_status || 'NOT_RUN'"></span>
+                            <span class="text-[10px] text-slate-500 font-medium" x-text="guardStatus.timestamp ? new Date(guardStatus.timestamp).toLocaleString('ko-KR') : 'not run'"></span>
+                        </div>
+                        <button @click="showGuardMonitor = false" class="text-slate-400 hover:text-slate-600 p-1">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <div class="p-3 overflow-y-auto flex-1 bg-white rounded-b-xl text-[11px]">
+                        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
+                            <template x-for="row in guardSummaryRows()" :key="row.label">
+                                <div class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2">
+                                    <div class="text-[9px] uppercase tracking-wider text-slate-400 font-black" x-text="row.label"></div>
+                                    <div class="mt-1 text-slate-700 font-bold break-words" x-text="row.value"></div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <div class="mb-3 rounded border border-slate-200 overflow-hidden">
+                            <div class="bg-slate-50 px-3 py-2 font-black text-slate-700 border-b border-slate-200">Detected Issues</div>
+                            <div class="divide-y divide-slate-100">
+                                <template x-for="issue in (guardStatus.issues || [])" :key="(issue.severity || '') + (issue.code || issue.summary || '')">
+                                    <div class="px-3 py-2 flex flex-wrap items-center gap-2">
+                                        <span class="px-1.5 py-0.5 rounded text-[9px] font-black"
+                                              :class="issue.severity === 'FAIL' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'"
+                                              x-text="issue.severity || '-'"></span>
+                                        <span class="font-black text-slate-800" x-text="issue.code || '-'"></span>
+                                        <span class="text-slate-500" x-text="issue.summary || ''"></span>
+                                    </div>
+                                </template>
+                                <template x-if="!(guardStatus.issues || []).length">
+                                    <div class="px-3 py-3 text-center text-slate-400 font-medium italic">감지된 이슈가 없습니다.</div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                            <div class="rounded border border-slate-200 overflow-hidden">
+                                <div class="bg-slate-50 px-3 py-2 font-black text-slate-700 border-b border-slate-200">Incident Report</div>
+                                <pre class="p-3 text-[10px] leading-relaxed whitespace-pre-wrap text-slate-700 max-h-80 overflow-auto" x-text="guardStatus.incident || 'No incident report.'"></pre>
+                            </div>
+                            <div class="rounded border border-slate-200 overflow-hidden">
+                                <div class="bg-slate-50 px-3 py-2 font-black text-slate-700 border-b border-slate-200">Codex Prompt</div>
+                                <pre class="p-3 text-[10px] leading-relaxed whitespace-pre-wrap text-slate-700 max-h-80 overflow-auto" x-text="guardStatus.codex_prompt || 'No Codex prompt.'"></pre>
+                            </div>
                         </div>
                     </div>
                 </div>
