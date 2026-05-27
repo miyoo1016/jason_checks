@@ -389,14 +389,30 @@ async def _unified_polling_loop(app):
             quote_busy = bool(quote_status.get("in_progress")) and int(quote_status.get("success") or 0) < 80
 
             if CURRENT_MARKET == "KR" and not quote_busy:
-                codes_set = set()
-                for tc in sub_active_themes:
-                    for s in sub_theme_data.get(tc, {}).get("stocks", []):
-                        codes_set.add(_normalize_symbol(s["code"]))
-                for s in getattr(app, "surge_data", []):
-                    if s.get("code"): codes_set.add(_normalize_symbol(s["code"]))
+                codes_dict = {}
 
-                unique_codes = list(codes_set)[:30]
+                # 1. AlphaForge first to ensure they are always polled
+                for s in sub_theme_data.get("AlphaForge", {}).get("stocks", []):
+                    code_norm = _normalize_symbol(s["code"])
+                    if code_norm:
+                        codes_dict[code_norm] = True
+
+                # 2. Other active themes
+                for tc in sub_active_themes:
+                    if tc == "AlphaForge":
+                        continue
+                    for s in sub_theme_data.get(tc, {}).get("stocks", []):
+                        code_norm = _normalize_symbol(s["code"])
+                        if code_norm:
+                            codes_dict[code_norm] = True
+
+                # 3. Surge data
+                for s in getattr(app, "surge_data", []):
+                    code_norm = _normalize_symbol(s.get("code") or "")
+                    if code_norm:
+                        codes_dict[code_norm] = True
+
+                unique_codes = list(codes_dict.keys())[:30]
                 logger.info("polling_stocks_start", count=len(unique_codes))
 
                 for code in unique_codes:

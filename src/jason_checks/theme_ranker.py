@@ -109,8 +109,18 @@ def get_expanded_subscription_codes(
     codes = []
     seen = set()
 
+    # Priority 0: AlphaForge MUST be at the front so it is never truncated
+    if "AlphaForge" in active_themes:
+        for stock in theme_data.get("AlphaForge", {}).get("stocks", []):
+            c = stock["code"]
+            if c not in seen:
+                codes.append(c)
+                seen.add(c)
+
     # Priority 1: all stocks from active themes
     for theme in active_themes:
+        if theme == "AlphaForge":
+            continue
         for stock in theme_data.get(theme, {}).get("stocks", []):
             c = stock["code"]
             if c not in seen:

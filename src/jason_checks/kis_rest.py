@@ -277,6 +277,9 @@ async def fetch_current_price(code: str) -> dict:
                     continue
                 out = data.get("output", {})
                 price = int(out.get("stck_prpr", 0) or 0)
+                if price <= 0:
+                    continue  # Fallback to next market (e.g., 'J') if no price data
+
                 # FHKST01010100 gives price, change, volume, value AND real-time foreigner net buy
                 return {
                     "price": price,
