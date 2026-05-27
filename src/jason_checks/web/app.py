@@ -124,6 +124,18 @@ def _guard_issues_from_incident(incident: str) -> list[dict]:
     return issues
 
 
+def _guard_report_age(timestamp: object) -> tuple[float | None, bool]:
+    if not timestamp:
+        return None, False
+    try:
+        checked_at = datetime.fromisoformat(str(timestamp))
+        now = datetime.now(checked_at.tzinfo) if checked_at.tzinfo else datetime.now()
+        age_sec = max(0.0, (now - checked_at).total_seconds())
+        return age_sec, age_sec > 15 * 60
+    except Exception:
+        return None, False
+
+
 def _theme_data_for_subscription(app: FastAPI) -> dict:
     theme_data = dict(getattr(app, "theme_data", {}) or {})
     alphaforge_theme = getattr(app, "alphaforge_theme_data", None)
@@ -751,6 +763,7 @@ def create_app() -> FastAPI:
             "quote_polling": quote_status,
             "supply_data_reason": supply_reason,
             "supply_polling": getattr(app, "supply_polling_status", {}),
+            "symbol_names": _watch_symbol_names(app),
         }
         pinned_list = [p for p in pinned.split(",") if p.strip()]
         if sort == "default":
@@ -1017,6 +1030,7 @@ def create_app() -> FastAPI:
             "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
             "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
             "alphaforge_picks": alphaforge_picks,
+            "symbol_names": _watch_symbol_names(app),
             "quote_polling": display_quote_status,
             "supply_data_reason": supply_reason,
             "supply_polling": getattr(app, "supply_polling_status", {}),
@@ -1180,16 +1194,25 @@ def create_app() -> FastAPI:
         health = _sanitize_guard_value(raw_health)
         incident = _read_text_file(_GUARD_INCIDENT_PATH)
         codex_prompt = _read_text_file(_GUARD_CODEX_PROMPT_PATH)
+        age_sec, stale = _guard_report_age(health.get("timestamp"))
         issues = health.get("issues") if isinstance(health.get("issues"), list) else []
         if not issues:
             issues = _guard_issues_from_incident(incident)
-        summary = "OK" if not issues else "; ".join(
-            str(item.get("code") or item.get("summary") or item) for item in issues[:3]
-        )
+        report_status = health.get("overall_status", "NOT_RUN")
+        display_status = "STALE" if stale else report_status
+        if stale:
+            summary = f"오래된 Guard 리포트: {int(age_sec // 60) if age_sec is not None else '?'}분 전 {report_status}"
+        else:
+            summary = "OK" if not issues else "; ".join(
+                str(item.get("code") or item.get("summary") or item) for item in issues[:3]
+            )
 
         return {
-            "overall_status": health.get("overall_status", "NOT_RUN"),
+            "overall_status": display_status,
+            "report_status": report_status,
             "timestamp": health.get("timestamp"),
+            "age_sec": age_sec,
+            "is_stale": stale,
             "summary": summary or "OK",
             "issues": issues,
             "health": health,

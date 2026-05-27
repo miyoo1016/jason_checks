@@ -8,8 +8,10 @@ themes:
     stocks:
       - code: "005930"
         name: "삼성전자"
+        core: true
       - code: "000660"
         name: "SK하이닉스"
+        core: true
       - code: "039030"
         name: "이오테크닉스"
       - code: "058470"
@@ -142,10 +144,13 @@ themes:
     stocks:
       - code: "005380"
         name: "현대차"
+        core: true
       - code: "000270"
         name: "기아"
+        core: true
       - code: "012330"
         name: "현대모비스"
+        core: true
       - code: "161390"
         name: "한국타이어"
       - code: "204320"

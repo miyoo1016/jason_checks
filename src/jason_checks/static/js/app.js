@@ -35,6 +35,7 @@ function timaApp() {
         showGuardMonitor: false,
         themes: {},
         stocks: {},
+        symbolNames: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
         wsConnected: false,
         mode: 'paper',
@@ -1128,6 +1129,8 @@ ${metaTextSvg}\
 
         findStockName(code) {
             if (!code) return '';
+            const mapped = this.symbolNames?.[code];
+            if (mapped && mapped !== code) return mapped;
             for (const theme of Object.values(this.themes || {})) {
                 for (const stock of theme.leaders || []) {
                     if (stock.code === code && stock.name && stock.name !== code) return stock.name;
@@ -1585,6 +1588,7 @@ ${metaTextSvg}\
             if (s === 'OK') return 'bg-green-500 text-white';
             if (s === 'WARN') return 'bg-amber-500 text-white';
             if (s === 'FAIL') return 'bg-red-600 text-white';
+            if (s === 'STALE') return 'bg-slate-500 text-white';
             return 'bg-slate-300 text-slate-700';
         },
 
@@ -1593,6 +1597,7 @@ ${metaTextSvg}\
             if (s === 'OK') return 'border-green-200 bg-green-50/40';
             if (s === 'WARN') return 'border-amber-200 bg-amber-50/50';
             if (s === 'FAIL') return 'border-red-200 bg-red-50/50';
+            if (s === 'STALE') return 'border-slate-300 bg-slate-50';
             return 'border-slate-200 bg-white/80';
         },
 
@@ -1600,7 +1605,12 @@ ${metaTextSvg}\
             const ts = this.guardStatus?.timestamp;
             if (!ts) return '-';
             try {
-                return new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+                const text = new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+                const age = Number(this.guardStatus?.age_sec);
+                if (this.guardStatus?.is_stale && Number.isFinite(age)) {
+                    return `${text} · ${Math.floor(age / 60)}분 전`;
+                }
+                return text;
             } catch (e) {
                 return ts;
             }
@@ -1652,6 +1662,7 @@ ${metaTextSvg}\
                 this.quotePolling = data.quote_polling || {};
                 this.supplyDataReason = data.supply_data_reason || '';
                 this.supplyPolling = data.supply_polling || {};
+                this.symbolNames = data.symbol_names || this.symbolNames || {};
 
                 if (data.themes) {
                     this.themes = data.themes;
@@ -1741,8 +1752,10 @@ ${metaTextSvg}\
             if (msg.type === 'tick') {
                 // Update stock state from WebSocket tick
                 const code = msg.code;
+                const priorName = this.stocks[code]?.name;
                 this.stocks[code] = {
                     code: code,
+                    name: priorName || this.findStockName(code) || code,
                     price: msg.price,
                     change_pct: msg.change_pct,
                     cumulative_volume: msg.cumulative_volume,

@@ -105,6 +105,7 @@ def select_leaders(
             "name": stock_info["name"],
             "score": score,
             "tick": tick,
+            "core": bool(stock_info.get("core", False)),
             "tier": stock_info.get("tier", ""),
             "alert_type": stock_info.get("alert_type", ""),
             "rs": stock_info.get("rs", ""),
@@ -122,7 +123,17 @@ def select_leaders(
     scored.sort(key=lambda x: x["score"], reverse=True)
     if theme_code == "AlphaForge":
         return scored
-    return scored[:4]
+
+    core_leaders = [stock for stock in scored if stock.get("core")]
+    selected = core_leaders[:4]
+    selected_codes = {stock["code"] for stock in selected}
+    for stock in scored:
+        if len(selected) >= 4:
+            break
+        if stock["code"] not in selected_codes:
+            selected.append(stock)
+            selected_codes.add(stock["code"])
+    return selected
 
 
 def compute_theme_strength(leaders: List[Dict], sort_mode: str = "strength") -> float:
