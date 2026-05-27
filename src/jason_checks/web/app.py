@@ -548,11 +548,23 @@ def create_app() -> FastAPI:
             app.alphaforge_candidates_loaded = 0
             app.alphaforge_candidates_path = ""
             app.alphaforge_candidates_generated_at = ""
+            app.alphaforge_candidates_source = ""
+            app.alphaforge_candidates_mode = ""
+            app.alphaforge_candidates_published_at = ""
+            app.alphaforge_candidates_is_stale = False
+            app.alphaforge_candidates_stale_age_hours = -1.0
+            app.alphaforge_candidates_fallback_warning = ""
             app.alphaforge_theme_data = {}
             if market == "KR":
                 alphaforge_candidates, alphaforge_meta = load_alphaforge_candidates_with_meta()
                 app.alphaforge_candidates_path = alphaforge_meta.get("path", "")
                 app.alphaforge_candidates_generated_at = alphaforge_meta.get("generated_at", "")
+                app.alphaforge_candidates_source = alphaforge_meta.get("source", "")
+                app.alphaforge_candidates_mode = alphaforge_meta.get("mode", "")
+                app.alphaforge_candidates_published_at = alphaforge_meta.get("published_at", "")
+                app.alphaforge_candidates_is_stale = alphaforge_meta.get("is_stale", False)
+                app.alphaforge_candidates_stale_age_hours = alphaforge_meta.get("stale_age_hours", -1.0)
+                app.alphaforge_candidates_fallback_warning = alphaforge_meta.get("fallback_warning", "")
                 if alphaforge_candidates:
                     app.alphaforge_theme_data = build_alphaforge_theme(alphaforge_candidates).get("AlphaForge", {})
                     app.alphaforge_candidates_loaded = len(alphaforge_candidates)
@@ -761,6 +773,12 @@ def create_app() -> FastAPI:
                 "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
                 "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
                 "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
+                "alphaforge_candidates_source": getattr(app, "alphaforge_candidates_source", ""),
+                "alphaforge_candidates_mode": getattr(app, "alphaforge_candidates_mode", ""),
+                "alphaforge_candidates_published_at": getattr(app, "alphaforge_candidates_published_at", ""),
+                "alphaforge_candidates_is_stale": getattr(app, "alphaforge_candidates_is_stale", False),
+                "alphaforge_candidates_stale_age_hours": getattr(app, "alphaforge_candidates_stale_age_hours", -1.0),
+                "alphaforge_candidates_fallback_warning": getattr(app, "alphaforge_candidates_fallback_warning", ""),
             "alphaforge_picks": [],
             "quote_polling": quote_status,
             "supply_data_reason": supply_reason,
@@ -1031,6 +1049,12 @@ def create_app() -> FastAPI:
             "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
             "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
             "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
+            "alphaforge_candidates_source": getattr(app, "alphaforge_candidates_source", ""),
+            "alphaforge_candidates_mode": getattr(app, "alphaforge_candidates_mode", ""),
+            "alphaforge_candidates_published_at": getattr(app, "alphaforge_candidates_published_at", ""),
+            "alphaforge_candidates_is_stale": getattr(app, "alphaforge_candidates_is_stale", False),
+            "alphaforge_candidates_stale_age_hours": getattr(app, "alphaforge_candidates_stale_age_hours", -1.0),
+            "alphaforge_candidates_fallback_warning": getattr(app, "alphaforge_candidates_fallback_warning", ""),
             "alphaforge_picks": alphaforge_picks,
             "symbol_names": _watch_symbol_names(app),
             "quote_polling": display_quote_status,

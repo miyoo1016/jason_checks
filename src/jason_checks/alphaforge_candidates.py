@@ -32,6 +32,8 @@ EXCLUDED_LOAD_STATUSES = {"REJECTED", "EXCLUDED", "DROP", "DROPPED"}
 EXPORT_PATH = Path("data") / "exports" / "alphaforge_candidates.json"
 DUAL_HORIZON_PATH = Path("data") / "exports" / "alphaforge_dual_horizon.json"
 EXPORT_ROW_KEYS = ("rows", "final_rows", "normalized_rows", "candidates", "data", "results")
+# active 파일이 이 시간(시간) 이상 오래됐으면 STALE 표시
+_STALE_HOURS_THRESHOLD = 6
 logger = structlog.get_logger()
 
 
@@ -42,16 +44,25 @@ def get_candidates_path(root: Path | None = None) -> Path:
 
 
 def get_candidate_path_priority(root: Path | None = None) -> list[Path]:
-    """Return candidate paths in load priority order."""
+    """Return candidate paths in load priority order.
+
+    Priority:
+      1. ALPHAFORGE_CANDIDATES_PATH env override
+      2. JO active file  (alphaforge_candidates_active.json)  ← 최우선
+      3. JO latest file  (alphaforge_candidates.json)
+      4. JC local data fallback
+    """
     project_root = root or Path(__file__).parent.parent.parent
     paths: list[Path] = []
     env_path = os.getenv("ALPHAFORGE_CANDIDATES_PATH")
     if env_path:
         paths.append(Path(env_path).expanduser())
+    jo_exports = project_root.parent / "jason_octopus" / "data" / "exports"
     paths.extend(
         [
-            project_root.parent / "jason_octopus" / "data" / "exports" / "alphaforge_candidates.json",
-            project_root / "data" / "alphaforge_candidates.json",
+            jo_exports / "alphaforge_candidates_active.json",   # active 우선
+            jo_exports / "alphaforge_candidates.json",          # latest fallback
+            project_root / "data" / "alphaforge_candidates.json",  # JC local fallback
         ]
     )
     return paths
@@ -196,34 +207,111 @@ def export_alphaforge_candidates(
     return stats
 
 
-def _extract_candidates(raw: Any) -> tuple[list[Any], str]:
+def _extract_candidates(raw: Any) -> tuple[list[Any], str, dict[str, Any]]:
+    """Return (raw_candidates, generated_at, file_metadata).
+
+    Supports both the new {metadata:{...}, candidates:[...]} format
+    and the legacy flat list / dict format.
+    """
+    file_meta: dict[str, Any] = {}
     if isinstance(raw, dict):
-        generated_at = str(raw.get("generated_at") or "")
-        raw_candidates = raw.get("candidates", [])
+        # New format: {metadata: {...}, candidates: [...]}
+        if "metadata" in raw and isinstance(raw["metadata"], dict):
+            file_meta = raw["metadata"]
+            generated_at = str(file_meta.get("generated_at") or "")
+            raw_candidates = raw.get("candidates", [])
+        else:
+            # Legacy dict format
+            generated_at = str(raw.get("generated_at") or "")
+            raw_candidates = raw.get("candidates", [])
     elif isinstance(raw, list):
         generated_at = ""
         raw_candidates = raw
     else:
-        return [], ""
+        return [], "", {}
 
     if not isinstance(raw_candidates, list):
-        return [], generated_at
+        return [], generated_at, file_meta
 
     if not generated_at:
         for item in raw_candidates:
             if isinstance(item, dict) and item.get("generated_at"):
                 generated_at = str(item["generated_at"])
                 break
-    return raw_candidates, generated_at
+    return raw_candidates, generated_at, file_meta
+
+
+def _is_stale(
+    generated_at: str,
+    threshold_hours: float = _STALE_HOURS_THRESHOLD,
+    published_at: str = "",
+) -> tuple[bool, float]:
+    """Return (is_stale, age_hours). age_hours=0 if timestamp is unparseable.
+
+    timestamp 해석 규칙:
+      - timezone 정보가 있으면 그대로 사용
+      - timezone 없는 naive string은 시스템 로컬 시간(KST)으로 해석
+        → datetime.now() (naive, local) 과 비교
+      - 계산 결과가 음수이면 0으로 clamp
+      - published_at이 있으면 generated_at보다 우선 사용
+    """
+    # published_at 우선, 없으면 generated_at
+    ts = (published_at or generated_at or "").strip()
+    if not ts:
+        return False, 0.0
+    try:
+        dt_str = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            # naive → 시스템 로컬 시간으로 해석 (naive now와 비교)
+            age_hours = (datetime.now() - dt).total_seconds() / 3600
+        else:
+            # aware → UTC now와 비교
+            age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+        age_hours = max(0.0, age_hours)  # 음수 clamp
+        return age_hours >= threshold_hours, round(age_hours, 2)
+    except Exception:
+        return False, 0.0
+
+
+
+def _source_tag_for_path(candidate_path: Path, root: Path | None = None) -> str:
+    """Return 'active' / 'latest' / 'local' / 'env' based on where the path sits."""
+    project_root = root or Path(__file__).parent.parent.parent
+    name = candidate_path.name
+    if "_active" in name:
+        return "active"
+    jo_exports = project_root.parent / "jason_octopus" / "data" / "exports"
+    if candidate_path.parent == jo_exports:
+        return "latest"
+    if candidate_path.parent == project_root / "data":
+        return "local"
+    return "env"
 
 
 def load_alphaforge_candidates_with_meta(
     path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Load candidates plus source metadata without raising on bad files."""
+    """Load candidates plus source metadata without raising on bad files.
+
+    Returned metadata keys:
+      path, generated_at, count, raw_count, filtered_count, first_symbol,
+      skipped_reason_counts, source (active/latest/local/env),
+      mode, max_symbols, source_count, candidate_count,
+      published_at, intended_for_session, is_stale, stale_age_hours,
+      fallback_warning
+    """
     paths = [path] if path else get_candidate_path_priority()
-    for candidate_path in paths:
+    active_path = (path is None) and None  # track whether active was tried
+    active_missing = False
+
+    for idx, candidate_path in enumerate(paths):
+        # Track if this is the active slot (index 0 after env override)
+        is_active_slot = "_active" in (candidate_path.name if candidate_path else "")
+
         if not candidate_path or not candidate_path.exists():
+            if is_active_slot:
+                active_missing = True
             logger.info(
                 "alphaforge_candidates_load",
                 path=str(candidate_path) if candidate_path else "",
@@ -237,11 +325,23 @@ def load_alphaforge_candidates_with_meta(
         try:
             with open(candidate_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            raw_candidates, generated_at = _extract_candidates(raw)
+            raw_candidates, generated_at, file_meta = _extract_candidates(raw)
             loaded, skipped_reason_counts = _normalize_loaded_candidates(raw_candidates)
             first_symbol = ""
             if raw_candidates and isinstance(raw_candidates[0], dict):
                 first_symbol = str(_pick(raw_candidates[0], "symbol", "code", "ticker"))
+
+            source_tag = _source_tag_for_path(candidate_path)
+            published_at_ts = str(file_meta.get("published_at") or "")
+            is_stale, stale_age_hours = _is_stale(generated_at, published_at=published_at_ts)
+
+            # fallback_warning: active 슬롯이 없거나 비어있을 때 latest/local을 쓰면 경고
+            fallback_warning = ""
+            if source_tag in ("latest", "local", "env") and (
+                active_missing or not any("_active" in str(p) for p in paths)
+            ):
+                fallback_warning = "ACTIVE 없음, latest fallback 사용"
+
             logger.info(
                 "alphaforge_candidates_load",
                 path=str(candidate_path),
@@ -249,6 +349,11 @@ def load_alphaforge_candidates_with_meta(
                 raw_count=len(raw_candidates),
                 filtered_count=len(loaded),
                 first_symbol=first_symbol,
+                source=source_tag,
+                mode=file_meta.get("mode", ""),
+                is_stale=is_stale,
+                stale_age_hours=stale_age_hours,
+                fallback_warning=fallback_warning,
                 skipped_reason_counts=dict(skipped_reason_counts),
             )
             return loaded, {
@@ -259,8 +364,21 @@ def load_alphaforge_candidates_with_meta(
                 "filtered_count": len(loaded),
                 "first_symbol": first_symbol,
                 "skipped_reason_counts": dict(skipped_reason_counts),
+                # ── 새 metadata 필드 ─────────────────────────────────
+                "source": source_tag,
+                "mode": str(file_meta.get("mode") or ""),
+                "max_symbols": file_meta.get("max_symbols", ""),
+                "source_count": file_meta.get("source_count", ""),
+                "candidate_count": file_meta.get("candidate_count", ""),
+                "published_at": str(file_meta.get("published_at") or ""),
+                "intended_for_session": str(file_meta.get("intended_for_session") or ""),
+                "is_stale": is_stale,
+                "stale_age_hours": stale_age_hours,
+                "fallback_warning": fallback_warning,
             }
         except Exception as e:
+            if is_active_slot:
+                active_missing = True
             logger.warning(
                 "alphaforge_candidates_load",
                 path=str(candidate_path),
@@ -281,6 +399,16 @@ def load_alphaforge_candidates_with_meta(
         "filtered_count": 0,
         "first_symbol": "",
         "skipped_reason_counts": {"no_usable_file": 1},
+        "source": "",
+        "mode": "",
+        "max_symbols": "",
+        "source_count": "",
+        "candidate_count": "",
+        "published_at": "",
+        "intended_for_session": "",
+        "is_stale": False,
+        "stale_age_hours": -1.0,
+        "fallback_warning": "후보 파일 없음",
     }
 
 
