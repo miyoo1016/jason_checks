@@ -503,12 +503,14 @@ async def _index_alert_loop(app):
                 price = float(getattr(idx, "price", 0) or 0)
                 if source not in ("dummy", "mock") and price > 0 and abs(chg) >= 0.1:  # 0 방어
                     try:
+                        session_now = get_session_status("KR")
                         await maybe_send_index_alert(
                             index_code=code,
                             index_name=name,
                             change_pct=chg,
                             price=price,
                             threshold_pct=3.0,
+                            session_status=session_now,
                         )
                     except Exception as e:
                         logger.warning("index_alert_error", code=code, error=str(e))

@@ -444,6 +444,7 @@ async def maybe_send_index_alert(
     change_pct: float,
     price: float,
     threshold_pct: float = 3.0,
+    session_status: str = "REGULAR",
 ) -> dict[str, Any]:
     """KOSPI/KOSDAQ 급등락 알람. |change_pct| >= threshold_pct 이면 후보."""
     abs_chg = abs(change_pct)
@@ -466,6 +467,26 @@ async def maybe_send_index_alert(
 
     if not telegram_enabled():
         result["blocked_reason"] = "no_credentials"
+        return result
+
+    if session_status not in ("REGULAR",):
+        reason = "MARKET_CLOSED" if session_status == "MARKET_CLOSED" else "non_regular_session"
+        result["blocked_reason"] = reason
+        logger.info(
+            "would_send_telegram",
+            symbol=key_symbol,
+            event_type=key_event,
+            would_send_telegram=False,
+            blocked_reason=result["blocked_reason"],
+            change_pct=change_pct,
+            dry_run=_is_dry_run(),
+        )
+        _record_event(
+            row={"symbol": key_symbol, "name": index_name, "event_type": key_event, "event_level": "INDEX"},
+            result="skipped",
+            reason=reason,
+            message=f"[{direction}] {change_pct:.2f}% / session={session_status}",
+        )
         return result
 
     if abs_chg < threshold_pct:
