@@ -340,7 +340,7 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
     event_type = str(row.get("event_type") or "")
 
     # Actually send
-    text = _build_message(row)
+    text = _build_alphaforge_message(result, row)
     sent_ok = await _send_message(text)
     if sent_ok:
         _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
@@ -364,7 +364,7 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
     event_type = str(row.get("event_type") or "")
 
     # Actually send
-    text = _build_message(row)
+    text = _build_alphaforge_message(result, row)
     sent_ok = await _send_message(text)
     if sent_ok:
         _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
