@@ -523,7 +523,7 @@ def evaluate_stock(
         confidence_score = max(0, confidence_score - 30)
 
     if chase:
-        no_buy_reasons.append(f"과열 추격 위험 (+{change_pct:.1f}%)")
+        no_buy_reasons.append(f"과열 추격 위험 ({change_pct:+.1f}%)")
         confidence_score = max(0, confidence_score - 20)
 
     if not market_gate["ok"]:

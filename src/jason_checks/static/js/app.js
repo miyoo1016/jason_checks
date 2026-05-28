@@ -1080,8 +1080,9 @@ ${metaTextSvg}\
 
         deSetupTop3Text() {
             const rows = Array.isArray(this.decisionSetupTop3) ? this.decisionSetupTop3 : [];
-            if (rows.length === 0) return '내일 관찰 후보: -';
-            return `내일 관찰 후보: ${rows.map(row => `${row.name || row.symbol} ${row.setup_score || 0}점`).join(' / ')}`;
+            const prefix = (this.sessionType === 'closed' || this.sessionType === 'after') ? '내일 관찰 후보:' : '관찰 후보:';
+            if (rows.length === 0) return `${prefix} -`;
+            return `${prefix} ${rows.map(row => `${row.name || row.symbol} ${row.setup_score || 0}점`).join(' / ')}`;
         },
 
         deTopReasonCodesText(limit = 3) {
@@ -1588,7 +1589,7 @@ ${metaTextSvg}\
             if (s === 'OK') return 'bg-green-500 text-white';
             if (s === 'WARN') return 'bg-amber-500 text-white';
             if (s === 'FAIL') return 'bg-red-600 text-white';
-            if (s === 'STALE') return 'bg-slate-500 text-white';
+            if (s === 'STALE') return 'bg-red-600 text-white animate-pulse font-bold';
             return 'bg-slate-300 text-slate-700';
         },
 

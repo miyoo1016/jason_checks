@@ -403,6 +403,40 @@ INDEX_CODES = {
 }
 
 
+def _compute_index_changes(current: float, chg_val_raw: float, chg_pct_raw: float, sign_code: str) -> tuple[float, float]:
+    """Calculate correct change_pct and change_value based on Priority B/C."""
+    if current <= 0:
+        return chg_pct_raw, chg_val_raw
+
+    # 1. Ensure chg_val has the correct sign based on sign_code
+    chg_val = float(chg_val_raw)
+    if sign_code in ["4", "5"]:  # Down
+        if chg_val > 0:
+            chg_val = -chg_val
+    elif sign_code in ["1", "2"]:  # Up
+        if chg_val < 0:
+            chg_val = -chg_val
+
+    # 2. Priority B calculation using previous_close
+    if chg_val != 0:
+        previous_close = current - chg_val
+        if previous_close > 0:
+            change_pct = (current / previous_close - 1) * 100
+            return round(change_pct, 2), round(chg_val, 2)
+
+    # 3. Priority C fallback
+    chg_pct = float(chg_pct_raw)
+    if sign_code in ["4", "5"]:
+        if chg_pct > 0:
+            chg_pct = -chg_pct
+    elif sign_code in ["1", "2"]:
+        if chg_pct < 0:
+            chg_pct = -chg_pct
+
+    return round(chg_pct, 2), round(chg_val, 2)
+
+
+
 async def fetch_naver_index(code: str) -> dict:
     """Fallback fetch from Naver Finance for indices."""
     naver_code = "KOSPI" if code == "0001" else "KOSDAQ"
@@ -412,12 +446,13 @@ async def fetch_naver_index(code: str) -> dict:
         resp = await client.get(url, headers=headers, timeout=3.0)
         resp.raise_for_status()
         data = resp.json()
-        price = float(data["closePrice"].replace(",", ""))
-        chg_val = float(data["compareToPreviousClosePrice"].replace(",", ""))
-        chg_pct = float(data["fluctuationsRatio"].replace(",", ""))
-        if data.get("compareToPreviousPrice", {}).get("code") == "5":
-            chg_val = -chg_val
-            chg_pct = -chg_pct
+        price = float(data.get("closePrice", "0").replace(",", ""))
+        chg_val = float(data.get("compareToPreviousClosePrice", "0").replace(",", ""))
+        chg_pct = float(data.get("fluctuationsRatio", "0").replace(",", ""))
+        sign_code = data.get("compareToPreviousPrice", {}).get("code", "")
+
+        chg_pct, chg_val = _compute_index_changes(price, chg_val, chg_pct, sign_code)
+
         return {
             "price": price,
             "change_pct": chg_pct,
@@ -477,8 +512,11 @@ async def fetch_market_indices(market: str = "KR") -> dict:
 
                 if market == "KR":
                     price = float(out.get("bstp_nmix_prpr", 0) or 0)
-                    chg_pct = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)
-                    chg_val = float(out.get("bstp_nmix_prdy_vrss", 0) or 0)
+                    chg_pct_raw = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)
+                    chg_val_raw = float(out.get("bstp_nmix_prdy_vrss", 0) or 0)
+                    sign_code = str(out.get("prdy_vrss_sign", ""))
+
+                    chg_pct, chg_val = _compute_index_changes(price, chg_val_raw, chg_pct_raw, sign_code)
                 else:
                     price = float(out.get("last", 0) or 0)
                     chg_pct = float(out.get("rate", 0) or 0)
