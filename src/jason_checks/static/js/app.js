@@ -57,6 +57,7 @@ function timaApp() {
         scanResults: { a: [], b: [], c: [] },
         alphaforgeCandidatesLoaded: 0,
         alphaforgeCandidatesGeneratedAt: '',
+        alphaforgeCandidatesPublishedAt: '',
         alphaforgePicksData: [],
         themeLoadStatus: 'ok',
         themeLoadReason: '',
@@ -398,8 +399,31 @@ function timaApp() {
             const total = Number(q.total) || 0;
             const success = Number(q.success) || 0;
             const missing = Number(q.missing) || 0;
-            if (!total) return '시세 로드: 대기';
-            return `시세 로드: ${success}/${total} · 누락 ${missing}`;
+            if (!total) return '가격 로드: 대기';
+            return `가격 ${success}/${total} · 누락 ${missing}`;
+        },
+
+        strengthSupplyLoadText() {
+            const q = this.quotePolling || {};
+            const total = Number(q.strength_total || q.theme_row_total || q.total) || 0;
+            const strength = Number(q.strength_success || q.theme_row_strength_count) || 0;
+            const s = this.supplyPolling || {};
+            const supplyOk = Number(s.ok) || 0;
+            const supplyTarget = Number(s.target_total) || 0;
+            const strengthText = total ? `체결강도 ${strength}/${total}` : '체결강도 대기';
+            const supplyText = supplyTarget ? `수급 선택 ${supplyOk}/${supplyTarget}` : '수급 선택 대기';
+            return `${strengthText} · ${supplyText} · 전체섹터 미조회`;
+        },
+
+        alphaForgeAgeBadge() {
+            const sourceTs = this.alphaforgeCandidatesPublishedAt || this.alphaforgeCandidatesGeneratedAt;
+            if (!sourceTs) return 'D-?';
+            const parsed = new Date(sourceTs);
+            if (Number.isNaN(parsed.getTime())) return 'D-?';
+            const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+            const days = Math.floor((startOfDay(new Date()) - startOfDay(parsed)) / 86400000);
+            if (!Number.isFinite(days) || days < 0) return 'D-?';
+            return `D-${days}`;
         },
 
         quoteEtaText() {
@@ -1589,7 +1613,7 @@ ${metaTextSvg}\
             if (s === 'OK') return 'bg-green-500 text-white';
             if (s === 'WARN') return 'bg-amber-500 text-white';
             if (s === 'FAIL') return 'bg-red-600 text-white';
-            if (s === 'STALE') return 'bg-red-600 text-white animate-pulse font-bold';
+            if (s === 'STALE') return 'bg-slate-900 text-white animate-pulse font-bold';
             return 'bg-slate-300 text-slate-700';
         },
 
@@ -1618,9 +1642,21 @@ ${metaTextSvg}\
         },
 
         guardIssueText(limit = 2) {
+            if (this.guardStatus?.is_stale) {
+                const oldIssues = this.guardStatus?.stale_report_issues || this.guardStatus?.historical_issues || [];
+                if (!oldIssues.length) return this.guardStatus?.summary || 'Guard 미실행';
+                return `과거 이슈: ${oldIssues.slice(0, limit).map(item => item.code || item.summary || String(item)).join(', ')}`;
+            }
             const issues = this.guardStatus?.issues || [];
             if (!issues.length) return this.guardStatus?.summary || '이슈 없음';
             return issues.slice(0, limit).map(item => item.code || item.summary || String(item)).join(', ');
+        },
+
+        guardDisplayIssues() {
+            if (this.guardStatus?.is_stale) {
+                return this.guardStatus?.stale_report_issues || this.guardStatus?.historical_issues || [];
+            }
+            return this.guardStatus?.issues || [];
         },
 
         guardAutoRepairText() {
@@ -1657,6 +1693,7 @@ ${metaTextSvg}\
                 this.mode = data.mode || 'paper';
                 this.alphaforgeCandidatesLoaded = data.alphaforge_candidates_loaded || 0;
                 this.alphaforgeCandidatesGeneratedAt = data.alphaforge_candidates_generated_at || '';
+                this.alphaforgeCandidatesPublishedAt = data.alphaforge_candidates_published_at || '';
                 this.alphaforgePicksData = Array.isArray(data.alphaforge_picks) ? data.alphaforge_picks : [];
                 this.themeLoadStatus = data.theme_load_status || 'ok';
                 this.themeLoadReason = data.theme_load_reason || '';

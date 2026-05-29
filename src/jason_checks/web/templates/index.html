@@ -150,8 +150,7 @@
                             <div class="text-emerald-700 normal-case" x-text="quoteLoadText()"></div>
                             <div class="text-gray-500 normal-case" x-text="`마지막 갱신: ${formatClock(quotePolling.updated_at || quotePolling.completed_at)}`"></div>
                             <div class="text-gray-500 normal-case" x-text="quoteEtaText()"></div>
-                            <div x-show="supplyDataReason" class="text-gray-400 normal-case"
-                                 x-text="supplyDataReason"></div>
+                            <div class="text-gray-500 normal-case" x-text="strengthSupplyLoadText()"></div>
                             <div x-show="alphaforgeCandidatesLoaded > 0" class="text-blue-600 normal-case"
                                  x-text="`AlphaForge 후보 로드: ${alphaforgeCandidatesLoaded}개 / ${alphaforgeCandidatesGeneratedAt || '-'}`"></div>
                         </div>
@@ -362,7 +361,7 @@
                     <div class="mb-4 rounded-lg border bg-slate-50 shadow-sm p-3">
                         <div class="flex justify-between items-center mb-2 pb-2 border-b border-gray-200">
                             <div class="flex items-center gap-2">
-                                <span class="text-sm font-black text-slate-800">AlphaForge Picks <span class="text-[10px] text-fuchsia-600 bg-fuchsia-50 px-1 py-0.5 rounded ml-1 font-bold">D-1</span></span>
+                                <span class="text-sm font-black text-slate-800">AlphaForge Picks <span class="text-[10px] text-fuchsia-600 bg-fuchsia-50 px-1 py-0.5 rounded ml-1 font-bold" x-text="alphaForgeAgeBadge()"></span></span>
                                 <span class="mono text-[10px] font-black text-blue-700 bg-blue-50 rounded px-1.5 py-0.5"
                                       x-text="`${alphaForgePicks().length}개`"></span>
                             </div>
@@ -827,9 +826,9 @@
                         </div>
 
                         <div class="mb-3 rounded border border-slate-200 overflow-hidden">
-                            <div class="bg-slate-50 px-3 py-2 font-black text-slate-700 border-b border-slate-200">Detected Issues</div>
+                            <div class="bg-slate-50 px-3 py-2 font-black text-slate-700 border-b border-slate-200" x-text="guardStatus.is_stale ? '과거 이슈' : 'Detected Issues'"></div>
                             <div class="divide-y divide-slate-100">
-                                <template x-for="issue in (guardStatus.issues || [])" :key="(issue.severity || '') + (issue.code || issue.summary || '')">
+                                <template x-for="issue in guardDisplayIssues()" :key="(issue.severity || '') + (issue.code || issue.summary || '')">
                                     <div class="px-3 py-2 flex flex-wrap items-center gap-2">
                                         <span class="px-1.5 py-0.5 rounded text-[9px] font-black"
                                               :class="issue.severity === 'FAIL' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'"
@@ -838,7 +837,7 @@
                                         <span class="text-slate-500" x-text="issue.summary || ''"></span>
                                     </div>
                                 </template>
-                                <template x-if="!(guardStatus.issues || []).length">
+                                <template x-if="!guardDisplayIssues().length">
                                     <div class="px-3 py-3 text-center text-slate-400 font-medium italic">감지된 이슈가 없습니다.</div>
                                 </template>
                             </div>

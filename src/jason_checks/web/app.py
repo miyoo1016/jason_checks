@@ -946,6 +946,7 @@ def create_app() -> FastAPI:
         ]
         theme_row_total = len(theme_rows)
         theme_row_price_count = sum(1 for stock in theme_rows if float(stock.get("price") or 0) > 0)
+        theme_row_strength_count = sum(1 for stock in theme_rows if float(stock.get("strength") or 0) > 0)
         watch_symbols = [_normalize_symbol(code) for code in (getattr(app, "watch_symbols", []) or [])]
         app_state_price_count = sum(
             1
@@ -982,6 +983,9 @@ def create_app() -> FastAPI:
             "app_state_price_count": app_state_price_count,
             "theme_row_total": theme_row_total,
             "theme_row_price_count": theme_row_price_count,
+            "theme_row_strength_count": theme_row_strength_count,
+            "strength_success": theme_row_strength_count,
+            "strength_total": theme_row_total,
             "symbol_mismatch_count": len(symbol_mismatch),
             "symbol_mismatch": symbol_mismatch,
             "missing_symbols": missing_quote_rows,
@@ -1241,12 +1245,14 @@ def create_app() -> FastAPI:
         if not issues:
             issues = _guard_issues_from_incident(incident)
         report_status = health.get("overall_status", "NOT_RUN")
+        historical_issues = issues if stale else []
+        display_issues = [] if stale else issues
         display_status = "STALE" if stale else report_status
         if stale:
-            summary = f"오래된 Guard 리포트: {int(age_sec // 60) if age_sec is not None else '?'}분 전 {report_status}"
+            summary = f"Guard 미실행: {int(age_sec // 60) if age_sec is not None else '?'}분 전 과거 {report_status} 리포트"
         else:
-            summary = "OK" if not issues else "; ".join(
-                str(item.get("code") or item.get("summary") or item) for item in issues[:3]
+            summary = "OK" if not display_issues else "; ".join(
+                str(item.get("code") or item.get("summary") or item) for item in display_issues[:3]
             )
 
         return {
@@ -1256,7 +1262,9 @@ def create_app() -> FastAPI:
             "age_sec": age_sec,
             "is_stale": stale,
             "summary": summary or "OK",
-            "issues": issues,
+            "issues": display_issues,
+            "stale_report_issues": historical_issues,
+            "historical_issues": historical_issues,
             "health": health,
             "server": health.get("server", {}),
             "indices": health.get("indices", {}),
