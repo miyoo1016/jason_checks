@@ -357,6 +357,105 @@
                         </template>
                     </div>
 
+                    <!-- AlphaForge Validation Report (from JO, read-only) -->
+                    <div class="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/10 shadow-sm p-3.5" x-show="market === 'KR'">
+                        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100 pb-2 mb-2">
+                            <div class="flex items-center gap-1.5 text-xs font-black text-indigo-900 uppercase tracking-wider">
+                                <svg class="w-3.5 h-3.5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                                <span>AlphaForge Validation (JO 분석)</span>
+                            </div>
+                            <span class="text-[9.5px] text-indigo-500 font-medium"
+                                  x-text="alphaForgeValidation?.available && alphaForgeValidation?.generated_at
+                                      ? `생성: ${new Date(alphaForgeValidation.generated_at).toLocaleString('ko-KR', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}`
+                                      : ''"></span>
+                        </div>
+
+                        <!-- 데이터 없음 -->
+                        <template x-if="!alphaForgeValidation || !alphaForgeValidation.available">
+                            <div class="text-center py-3 bg-white/60 rounded border border-dashed border-indigo-200">
+                                <span class="text-[11px] font-bold text-indigo-800/60 block"
+                                      x-text="alphaForgeValidation?.reason || 'AlphaForge 검증 리포트 없음'"></span>
+                                <span class="text-[9.5px] text-slate-400 mt-1 block">JO(jason_octopus)가 검증 리포트를 생성하면 자동 표시됩니다.</span>
+                            </div>
+                        </template>
+
+                        <!-- 데이터 있음 -->
+                        <template x-if="alphaForgeValidation && alphaForgeValidation.available">
+                            <div>
+                                <!-- 헤더 요약 -->
+                                <div class="flex flex-wrap gap-3 mb-2 text-[10px] font-bold text-slate-700">
+                                    <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                          x-text="`신호 ${alphaForgeValidation.signal_count}건 → 평가 ${alphaForgeValidation.evaluated_count}건`"></span>
+                                    <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                          x-text="`벤치마크 ${alphaForgeValidation.benchmark || '-'}`"></span>
+                                    <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                          x-text="`거래비용 ${((alphaForgeValidation.transaction_cost_rt || 0)*100).toFixed(2)}% (왕복)`"></span>
+                                    <template x-if="alphaForgeValidation.data_date_range?.earliest">
+                                        <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                              x-text="`데이터 ${alphaForgeValidation.data_date_range.earliest} ~ ${alphaForgeValidation.data_date_range.latest}`"></span>
+                                    </template>
+                                </div>
+
+                                <!-- Overall 5개 기간 -->
+                                <div class="text-[9.5px] font-black text-indigo-800 mb-1 uppercase tracking-wider">전체 종합</div>
+                                <div class="grid grid-cols-3 sm:grid-cols-5 gap-1.5 mb-2">
+                                    <template x-for="w in (alphaForgeValidation.windows || [1,3,5,10,20])" :key="'ov-'+w">
+                                        <div class="bg-white/80 border rounded p-1.5 text-center"
+                                             :class="alphaForgeValidation.overall?.[w]?.insufficient ? 'border-slate-100 opacity-60' : 'border-indigo-200'">
+                                            <div class="text-[9px] font-black text-indigo-700 mb-0.5" x-text="`${w}일`"></div>
+                                            <template x-if="!alphaForgeValidation.overall?.[w]?.insufficient">
+                                                <div>
+                                                    <div class="font-black font-mono text-[11px]"
+                                                         :class="(alphaForgeValidation.overall?.[w]?.avg_net_alpha || 0) >= 0 ? 'text-red-500' : 'text-blue-500'"
+                                                         x-text="`${((alphaForgeValidation.overall?.[w]?.avg_net_alpha || 0)*100) >= 0 ? '+' : ''}${((alphaForgeValidation.overall?.[w]?.avg_net_alpha || 0)*100).toFixed(2)}%`"></div>
+                                                    <div class="text-[9px] text-slate-500"
+                                                         x-text="`승 ${((alphaForgeValidation.overall?.[w]?.win_rate || 0)*100).toFixed(0)}%`"></div>
+                                                    <div class="text-[8px] text-slate-400"
+                                                         x-text="`n=${alphaForgeValidation.overall?.[w]?.n}`"></div>
+                                                </div>
+                                            </template>
+                                            <template x-if="alphaForgeValidation.overall?.[w]?.insufficient">
+                                                <div class="text-[8px] text-slate-400 mt-0.5">통계 부족</div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+
+                                <!-- 알림유형별 -->
+                                <template x-if="Object.keys(alphaForgeValidation.by_alert_type || {}).length > 0">
+                                    <div>
+                                        <div class="text-[9.5px] font-black text-indigo-800 mb-1 uppercase tracking-wider">알림 유형별</div>
+                                        <div class="space-y-1">
+                                            <template x-for="[atype, adata] in Object.entries(alphaForgeValidation.by_alert_type || {})" :key="'at-'+atype">
+                                                <div class="bg-white/70 rounded border border-indigo-100 px-2 py-1 flex flex-wrap items-center gap-2 text-[9.5px]">
+                                                    <span class="font-black text-indigo-900 min-w-[90px]" x-text="atype"></span>
+                                                    <span class="bg-indigo-50 text-indigo-700 rounded px-1 font-bold" x-text="`n=${adata.n}`"></span>
+                                                    <template x-if="adata.n < (alphaForgeValidation.min_n || 20)">
+                                                        <span class="text-slate-400 font-semibold">통계 부족 (n &lt; <span x-text="alphaForgeValidation.min_n || 20"></span>)</span>
+                                                    </template>
+                                                    <template x-if="adata.n >= (alphaForgeValidation.min_n || 20)">
+                                                        <div class="flex flex-wrap gap-1.5">
+                                                            <template x-for="w in (alphaForgeValidation.windows || [1,3,5,10,20])" :key="'at-w-'+w">
+                                                                <template x-if="!adata.windows?.[w]?.insufficient">
+                                                                    <span class="font-mono font-bold"
+                                                                          :class="(adata.windows?.[w]?.avg_net_alpha || 0) >= 0 ? 'text-red-500' : 'text-blue-500'"
+                                                                          x-text="`${w}d: ${((adata.windows?.[w]?.avg_net_alpha || 0)*100 >= 0 ? '+' : '')}${((adata.windows?.[w]?.avg_net_alpha || 0)*100).toFixed(2)}%`"></span>
+                                                                </template>
+                                                                <template x-if="adata.windows?.[w]?.insufficient">
+                                                                    <span class="text-slate-300 font-mono" x-text="`${w}d:-`"></span>
+                                                                </template>
+                                                            </template>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+
                     <!-- AlphaForge Picks Panel (Full-Width Row List) -->
                     <div class="mb-4 rounded-lg border bg-slate-50 shadow-sm p-3">
                         <div class="flex justify-between items-center mb-2 pb-2 border-b border-gray-200">

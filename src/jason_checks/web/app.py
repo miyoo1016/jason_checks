@@ -507,6 +507,48 @@ async def _telegram_alert_loop(app):
         await asyncio.sleep(30)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AlphaForge Validation Report (read-only, from JO)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AV_REPORT_PATH = Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json")
+_av_cache: dict = {}          # 마지막으로 읽은 summary 딕셔너리
+_av_last_mtime: float = -1.0  # os.stat mtime 추적용
+
+
+def _load_alphaforge_validation() -> dict:
+    """JO가 생성한 summary.json을 안전하게 읽어 반환한다. 실패하면 빈 dict."""
+    global _av_cache, _av_last_mtime
+    try:
+        if not _AV_REPORT_PATH.exists():
+            return {}
+        mtime = _AV_REPORT_PATH.stat().st_mtime
+        if mtime == _av_last_mtime and _av_cache:
+            return _av_cache
+        with _AV_REPORT_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 최소 필드 확인
+        if not isinstance(data, dict) or "overall" not in data:
+            return {}
+        _av_last_mtime = mtime
+        _av_cache = data
+        return data
+    except Exception as e:
+        logger.warning("alphaforge_validation_load_error", error=str(e))
+        return {}
+
+
+async def _alphaforge_validation_loop(app):
+    """60초마다 summary.json mtime 변경 감지 후 캐시 갱신."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            _load_alphaforge_validation()
+        except Exception as e:
+            logger.warning("alphaforge_validation_loop_error", error=str(e))
+        await asyncio.sleep(60)
+
+
 async def _index_alert_loop(app):
     """KOSPI/KOSDAQ 급등락 Telegram 알람 루프. 15분 쿨다운 내장."""
     await asyncio.sleep(15)  # 지수 polling이 먼저 뜰 때까지 대기
@@ -659,6 +701,7 @@ def create_app() -> FastAPI:
         asyncio.create_task(_signal_journal_loop(app))
         asyncio.create_task(_telegram_alert_loop(app))
         asyncio.create_task(_index_alert_loop(app))
+        asyncio.create_task(_alphaforge_validation_loop(app))
 
     @app.on_event("shutdown")
     async def shutdown():
@@ -668,6 +711,62 @@ def create_app() -> FastAPI:
     async def root():
         template_path = Path(__file__).parent / "templates" / "index.html"
         return FileResponse(template_path)
+
+    @app.get("/api/alphaforge-validation")
+    async def get_alphaforge_validation():
+        """JO의 AlphaForge validation summary.json을 읽기 전용으로 반환한다."""
+        try:
+            data = _load_alphaforge_validation()
+            if not data:
+                return {
+                    "available": False,
+                    "reason": "AlphaForge 검증 리포트 없음",
+                }
+            overall = data.get("overall", {})
+            by_alert = data.get("by_alert_type", {})
+            windows = data.get("windows", [1, 3, 5, 10, 20])
+            min_n = data.get("min_n_for_stats", 20)
+
+            def _window_stat(section: dict, w: int) -> dict:
+                key = f"{w}d"
+                wdata = section.get(key, {})
+                if wdata.get("insufficient", True):
+                    n_valid = wdata.get("n_valid", 0)
+                    return {"insufficient": True, "n": n_valid, "note": f"n={n_valid} < {min_n}, 통계 부족"}
+                return {
+                    "insufficient": False,
+                    "n": wdata.get("n_valid", 0),
+                    "avg_return": wdata.get("avg_return"),
+                    "avg_alpha": wdata.get("avg_alpha"),
+                    "avg_net_alpha": wdata.get("avg_net_alpha"),
+                    "win_rate": wdata.get("win_rate"),
+                }
+
+            overall_stats = {str(w): _window_stat(overall, w) for w in windows}
+
+            by_type_stats = {}
+            for alert_type, adata in by_alert.items():
+                by_type_stats[alert_type] = {
+                    "n": adata.get("n", 0),
+                    "windows": {str(w): _window_stat(adata, w) for w in windows},
+                }
+
+            return {
+                "available": True,
+                "generated_at": data.get("generated_at", ""),
+                "data_date_range": data.get("data_date_range", {}),
+                "signal_count": data.get("total_signals_loaded", 0),
+                "evaluated_count": data.get("computed_signals", 0),
+                "benchmark": data.get("benchmark", ""),
+                "transaction_cost_rt": data.get("transaction_cost_rt", 0),
+                "windows": windows,
+                "min_n": min_n,
+                "overall": {"n": overall.get("n", 0), **overall_stats},
+                "by_alert_type": by_type_stats,
+            }
+        except Exception as e:
+            logger.warning("alphaforge_validation_api_error", error=str(e))
+            return {"available": False, "reason": "AlphaForge 검증 리포트 없음"}
 
     @app.post("/api/market")
     async def switch_market(payload: dict = Body(...)):

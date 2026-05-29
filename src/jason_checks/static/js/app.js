@@ -87,6 +87,7 @@ function timaApp() {
         duplicatedSymbols: [],
         suspiciousSectorMembers: [],
         forwardTestSummary: null,
+        alphaForgeValidation: null,
 
         // Methods
         async init() {
@@ -153,8 +154,23 @@ function timaApp() {
                 if (this.market === 'KR') this.loadKrSectorLeaders();
             }, 3000);
 
+            // AlphaForge Validation (from JO) — 60초 polling
+            this.loadAlphaForgeValidation();
+            setInterval(() => this.loadAlphaForgeValidation(), 60000);
+
             // ── Focus / visibility refresh (background tab 복귀 시 즉시 갱신) ──
             this._setupFocusRefresh();
+        },
+
+        async loadAlphaForgeValidation() {
+            try {
+                const res = await fetch('/api/alphaforge-validation');
+                if (!res.ok) return;
+                const data = await res.json();
+                this.alphaForgeValidation = data;
+            } catch (e) {
+                // 조용히 처리 — 대시보드 전체에 영향 없음
+            }
         },
 
         async loadUsWatchlist() {
