@@ -1269,9 +1269,13 @@ def create_app() -> FastAPI:
     @app.get("/api/telegram/status")
     async def get_telegram_status():
         from jason_checks.telegram_notifier import (
-            get_telegram_config, _credentials_present, _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date, _recent_events
+            get_telegram_config, _credentials_present, _get_credentials, _recent_alerts, _hourly_sent,
+            _daily_sent, _daily_reset_date, _recent_events, _last_ok_at, _last_error_at, _last_error_reason
         )
         cfg = get_telegram_config()
+        token, chat_id = _get_credentials()
+        token_present = bool(str(token or "").strip())
+        chat_id_present = bool(str(chat_id or "").strip())
 
         sent_today = len([e for e in _recent_events if e.get("result") == "sent"])
         failed_today = len([e for e in _recent_events if e.get("result") == "failed"])
@@ -1286,6 +1290,9 @@ def create_app() -> FastAPI:
             "mode": cfg["mode"],
             "min_level": cfg["min_level"],
             "credentials_present": _credentials_present(),
+            "configured": token_present and chat_id_present,
+            "token_present": token_present,
+            "chat_id_present": chat_id_present,
             "recent_alerts_count": len(_recent_alerts),
             "hourly_sent_count": len(_hourly_sent),
             "daily_sent": _daily_sent,
@@ -1297,8 +1304,10 @@ def create_app() -> FastAPI:
             "failed_today_count": failed_today,
             "skipped_today_count": skipped_today,
             "last_sent_at": last_sent,
-            "last_error_at": last_error_event.get("timestamp") if last_error_event else None,
-            "last_error_reason": last_error_event.get("reason") if last_error_event else None
+            "last_ok_at": _last_ok_at or last_sent,
+            "last_error_at": _last_error_at or (last_error_event.get("timestamp") if last_error_event else None),
+            "last_error_reason": _last_error_reason or (last_error_event.get("reason") if last_error_event else None),
+            "runtime_last_error_at": _last_error_at,
         }
 
     @app.get("/api/guard/status")

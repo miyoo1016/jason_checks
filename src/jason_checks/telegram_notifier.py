@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import time
 import json
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -39,10 +40,14 @@ _hourly_sent: list[float] = []                       # 전역 발송 시각 목�
 _daily_sent: dict[str, int] = {}
 _daily_reset_date: str = ""
 _recent_events: list[dict[str, Any]] = []
+_recent_send_attempts: dict[str, float] = {}
+_last_ok_at: int | None = None
+_last_error_at: int | None = None
+_last_error_reason: str = ""
 _STATE_FILE = "data/runtime/telegram_alert_state.json"
 
 def _load_state():
-    global _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date, _recent_events
+    global _recent_alerts, _hourly_sent, _daily_sent, _daily_reset_date, _recent_events, _last_ok_at, _last_error_at, _last_error_reason
     try:
         if os.path.exists(_STATE_FILE):
             with open(_STATE_FILE, "r") as f:
@@ -52,6 +57,9 @@ def _load_state():
             _daily_sent = d.get("daily_sent", {})
             _daily_reset_date = d.get("daily_reset_date", "")
             _recent_events = d.get("recent_events", [])
+            _last_ok_at = d.get("last_ok_at")
+            _last_error_at = d.get("last_error_at")
+            _last_error_reason = str(d.get("last_error_reason") or "")
     except Exception:
         pass
 
@@ -64,7 +72,10 @@ def _save_state():
                 "hourly_sent": _hourly_sent,
                 "daily_sent": _daily_sent,
                 "daily_reset_date": _daily_reset_date,
-                "recent_events": _recent_events
+                "recent_events": _recent_events,
+                "last_ok_at": _last_ok_at,
+                "last_error_at": _last_error_at,
+                "last_error_reason": _last_error_reason
             }, f)
     except Exception:
         pass
@@ -149,12 +160,21 @@ def _parse_bool(val: str | None, default: bool) -> bool:
 
 def _credentials_present() -> bool:
     token, chat = _get_credentials()
-    return bool(token) and bool(chat)
+    return bool(str(token).strip()) and bool(str(chat).strip())
 
 
 def telegram_enabled() -> bool:
     """Return whether credentials exist, without exposing them."""
     return _credentials_present()
+
+
+def _credential_error_reason() -> str:
+    token, chat_id = _get_credentials()
+    if not str(token or "").strip():
+        return "send_error: missing_token"
+    if not str(chat_id or "").strip():
+        return "send_error: missing_chat_id"
+    return ""
 
 
 def _is_enabled() -> bool:
@@ -222,16 +242,100 @@ def _record_sent(now: float | None = None) -> None:
     _hourly_sent.append(now if now is not None else time.time())
     _save_state()
 
+
+def _record_send_status(ok: bool, reason: str = "") -> None:
+    global _last_ok_at, _last_error_at, _last_error_reason
+    now_ms = int(time.time() * 1000)
+    if ok:
+        _last_ok_at = now_ms
+    else:
+        _last_error_at = now_ms
+        _last_error_reason = str(reason or "send_error")
+    _save_state()
+
+
+def _attempt_key(symbol: str, event_type: str, event_level: str) -> str:
+    return f"{symbol}:{event_type}:{event_level}"
+
+
+def _duplicate_attempt_suppressed(symbol: str, event_type: str, event_level: str, cooldown_sec: float = 60) -> bool:
+    now_ts = time.time()
+    key = _attempt_key(symbol, event_type, event_level)
+    last = _recent_send_attempts.get(key, 0.0)
+    if now_ts - last < cooldown_sec:
+        return True
+    _recent_send_attempts[key] = now_ts
+    return False
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 실제 HTTP 발송
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _send_message(text: str) -> bool:
-    """실제 Telegram sendMessage 호출. 토큰/chat_id 절대 로그 금지."""
+def _truncate_detail(value: object, limit: int = 200) -> str:
+    text = str(value or "").replace("\n", " ").replace("\r", " ").strip()
+    return text[:limit]
+
+
+def _mask_sensitive(text: str, token: str = "", chat_id: str = "") -> str:
+    masked = str(text or "")
+    for secret, replacement in ((token, "<token>"), (chat_id, "<chat_id>")):
+        secret = str(secret or "").strip()
+        if secret:
+            masked = masked.replace(secret, replacement)
+    return masked
+
+
+def _telegram_http_reason(status_code: int, description: str = "") -> str:
+    labels = {
+        400: "http_400_bad_request",
+        401: "http_401_unauthorized",
+        403: "http_403_forbidden",
+        404: "http_404_not_found",
+        409: "http_409_conflict",
+        429: "http_429_too_many_requests",
+    }
+    reason = f"send_error: {labels.get(status_code, f'http_{status_code}')}"
+    detail = _truncate_detail(description)
+    return f"{reason} {detail}".strip()
+
+
+async def _send_message_result(text: str) -> dict[str, Any]:
+    """Send Telegram message and return sanitized diagnostics."""
     token, chat_id = _get_credentials()
-    if not (token and chat_id):
-        logger.warning("telegram_send_skipped", reason="no_credentials")
-        return False
+    token = str(token or "").strip()
+    chat_id = str(chat_id or "").strip()
+    env_loaded = "TELEGRAM_BOT_TOKEN" in os.environ or "TELEGRAM_CHAT_ID" in os.environ
+    if not token:
+        reason = "send_error: missing_token"
+        logger.warning("telegram_send_skipped", reason=reason, env_loaded=env_loaded)
+        _record_send_status(False, reason)
+        return {"ok": False, "reason": reason, "env_loaded": env_loaded}
+    if not chat_id:
+        reason = "send_error: missing_chat_id"
+        logger.warning("telegram_send_skipped", reason=reason, env_loaded=env_loaded)
+        _record_send_status(False, reason)
+        return {"ok": False, "reason": reason, "env_loaded": env_loaded}
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
+        try:
+            result = await _send_message_http(text, token, chat_id)
+        except Exception as e:
+            result = _send_exception_result(e, token, chat_id)
+        reason = str(result.get("reason") or "")
+        if result.get("ok") or reason not in {"send_error: timeout", "send_error: connection_error"} or attempts >= 2:
+            _record_send_status(bool(result.get("ok")), reason)
+            if attempts > 1:
+                result["retry_attempted"] = True
+            return result
+        logger.warning("telegram_send_retry", reason=reason, attempt=attempts, timeout_sec=10)
+        await asyncio.sleep(0.5)
+    reason = "send_error: exception:retry_exhausted"
+    _record_send_status(False, reason)
+    return {"ok": False, "reason": reason, "retry_attempted": True}
+
+
+async def _send_message_http(text: str, token: str, chat_id: str) -> dict[str, Any]:
     try:
         import httpx
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -243,21 +347,64 @@ async def _send_message(text: str) -> bool:
         }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, json=payload)
-        ok = resp.status_code == 200 and resp.json().get("ok") is True
-        if ok:
-            logger.info("telegram_sent", chars=len(text))
-        else:
-            # 오류 코드만 기록, 응답 body에 token 없으므로 안전
+        try:
+            body = resp.json()
+        except ValueError as e:
+            reason = f"send_error: json_decode_error:{type(e).__name__}"
             logger.warning(
                 "telegram_send_error",
-                status=resp.status_code,
-                error_code=resp.json().get("error_code"),
-                description=resp.json().get("description", "")
+                reason=reason,
+                status_code=resp.status_code,
+                response_ok=False,
+                description=_truncate_detail(_mask_sensitive(resp.text, token, chat_id)),
             )
-        return ok
-    except Exception as e:
-        logger.warning("telegram_send_exception", error=str(e))
-        return False
+            return {"ok": False, "reason": reason, "status_code": resp.status_code}
+
+        response_ok = body.get("ok") is True
+        ok = resp.status_code == 200 and response_ok
+        if ok:
+            logger.info("telegram_sent", chars=len(text))
+            return {"ok": True, "reason": "success", "status_code": resp.status_code}
+        else:
+            description = _mask_sensitive(str(body.get("description", "")), token, chat_id)
+            reason = _telegram_http_reason(resp.status_code, description)
+            logger.warning(
+                "telegram_send_error",
+                reason=reason,
+                status_code=resp.status_code,
+                response_ok=response_ok,
+                error_code=body.get("error_code"),
+                description=_truncate_detail(description),
+            )
+            return {
+                "ok": False,
+                "reason": reason,
+                "status_code": resp.status_code,
+                "response_ok": response_ok,
+                "error_code": body.get("error_code"),
+            }
+    except Exception:
+        raise
+
+
+def _send_exception_result(e: Exception, token: str, chat_id: str) -> dict[str, Any]:
+    exc_name = type(e).__name__
+    reason = f"send_error: exception:{exc_name}"
+    try:
+        import httpx
+        if isinstance(e, httpx.TimeoutException):
+            reason = "send_error: timeout"
+        elif isinstance(e, (httpx.ConnectError, httpx.NetworkError)):
+            reason = "send_error: connection_error"
+    except Exception:
+        pass
+    logger.warning("telegram_send_exception", reason=reason, error=_truncate_detail(_mask_sensitive(str(e), token, chat_id)))
+    return {"ok": False, "reason": reason}
+
+
+async def _send_message(text: str) -> bool:
+    """Compatibility wrapper. Use _send_message_result when caller needs details."""
+    return bool((await _send_message_result(text)).get("ok"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +469,12 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
 
     if not result["would_send_telegram"]:
         reason = result["blocked_by"][0] if result["blocked_by"] else "unknown"
+        if reason == "no_credentials":
+            detail = _credential_error_reason() or "send_error: no_credentials"
+            logger.warning("telegram_send_skipped", reason=detail, symbol=result["symbol"], event_type=result["event_type"])
+            _record_event(row, "failed", detail)
+            result["send_result"] = {"ok": False, "reason": detail}
+            return result
         logger.info("telegram_skip", reason=reason, symbol=result["symbol"], event_type=result["event_type"])
         _record_event(row, "skipped", reason)
         return result
@@ -338,16 +491,27 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
 
     symbol = str(row.get("symbol") or row.get("code") or "")
     event_type = str(row.get("event_type") or "")
+    event_level = str(result.get("event_level") or "")
+
+    if _duplicate_attempt_suppressed(symbol, event_type, event_level):
+        result["would_send_telegram"] = False
+        result["blocked_by"] = ["duplicate_suppressed"]
+        logger.info("telegram_skip", reason="duplicate_suppressed", symbol=symbol, event_type=event_type)
+        _record_event(row, "skipped", "duplicate_suppressed")
+        return result
 
     # Actually send
     text = _build_alphaforge_message(result, row)
-    sent_ok = await _send_message(text)
+    send_result = await _send_message_result(text)
+    sent_ok = bool(send_result.get("ok"))
+    result["send_result"] = send_result
     if sent_ok:
         _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
         _record_sent()
         _record_event(row, "sent", "success")
     else:
-        _record_event(row, "failed", "send_error")
+        reason = str(send_result.get("reason") or "send_error")
+        _record_event(row, "failed", reason)
 
     return result
 
@@ -365,7 +529,9 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
 
     # Actually send
     text = _build_alphaforge_message(result, row)
-    sent_ok = await _send_message(text)
+    send_result = await _send_message_result(text)
+    sent_ok = bool(send_result.get("ok"))
+    result["send_result"] = send_result
     if sent_ok:
         _should_send(symbol, event_type, result.get('event_level', ''), mark=True)
         _record_sent()
@@ -393,8 +559,9 @@ async def maybe_send_event(row: dict[str, Any], *, dry_run: bool | None = None) 
     _record_sent()
 
     text = _build_alphaforge_message(result, row)
-    sent = await _send_message(text)
-    result["sent"] = sent
+    send_result = await _send_message_result(text)
+    result["sent"] = bool(send_result.get("ok"))
+    result["send_result"] = send_result
     return result
 
 

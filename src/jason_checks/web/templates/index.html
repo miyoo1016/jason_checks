@@ -234,7 +234,8 @@
                                 <template x-if="telegramStatus.dry_run"><span class="px-1.5 py-0.5 rounded bg-amber-500 text-white text-[9px]">DRY_RUN</span></template>
                                 <span class="text-slate-500 border-l border-slate-200 pl-2">발송/스킵: <span class="text-[#1E7FA6]" x-text="telegramStatus.sent_today_count"></span> / <span class="text-slate-400" x-text="telegramStatus.skipped_today_count"></span></span>
                                 <span class="text-slate-500 border-l border-slate-200 pl-2">오류: <span class="text-red-500" x-text="telegramStatus.failed_today_count"></span></span>
-                                <span class="text-slate-500 border-l border-slate-200 pl-2">마지막: <span class="text-slate-700" x-text="telegramStatus.last_sent_at ? new Date(telegramStatus.last_sent_at).toLocaleTimeString('ko-KR') : '-'"></span></span>
+                                <span class="text-slate-500 border-l border-slate-200 pl-2">OK: <span class="text-slate-700" x-text="telegramStatus.last_ok_at ? new Date(telegramStatus.last_ok_at).toLocaleTimeString('ko-KR') : '-'"></span></span>
+                                <span x-show="telegramStatus.last_error_reason" class="text-red-500 border-l border-slate-200 pl-2 truncate max-w-[360px]" x-text="telegramStatus.last_error_reason"></span>
                             </div>
                             <button @click.prevent.stop="showTelegramMonitor = true" class="px-2.5 py-1 rounded bg-[#2AABEE]/10 text-[#1E7FA6] hover:bg-[#2AABEE]/20 transition-colors font-bold border border-[#2AABEE]/30">전송내역 보기</button>
                         </div>
@@ -915,6 +916,9 @@
                         </button>
                     </div>
                     <div class="p-3 overflow-y-auto flex-1 bg-white rounded-b-xl text-[11px]">
+                        <div x-show="guardStatus.is_stale" class="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-600 font-bold">
+                            이 Guard 결과는 현재 실시간 상태가 아니라 오래된 점검 결과입니다. 최신 점검은 scripts/run_jc_guard.sh --no-telegram 으로 실행하세요.
+                        </div>
                         <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
                             <template x-for="row in guardSummaryRows()" :key="row.label">
                                 <div class="rounded border border-slate-200 bg-slate-50 px-2.5 py-2">
