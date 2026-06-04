@@ -35,6 +35,7 @@ function timaApp() {
         showGuardMonitor: false,
         themes: {},
         stocks: {},
+        liveQuotes: {},
         symbolNames: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
         wsConnected: false,
@@ -702,9 +703,10 @@ ${metaTextSvg}\
             if (!key || !Number.isFinite(p) || p <= 0) return;
 
             const store = this.chartHistory[bucket] || (this.chartHistory[bucket] = {});
+            const chartKey = bucket === 'stocks' ? this.normalizeCode(key) : key;
             const now = Date.now();
             const baseline = this._priceBaseline(p, changePct);
-            const chart = store[key] || {
+            const chart = store[chartKey] || {
                 baseline: baseline || p,
                 points: [],
             };
@@ -717,7 +719,7 @@ ${metaTextSvg}\
                 chart.points.push({ t: now, p });
             }
             chart.points = chart.points.slice(-1500);
-            store[key] = chart;
+            store[chartKey] = chart;
         },
 
         chartFromHistory(bucket, key) {
@@ -757,10 +759,12 @@ ${metaTextSvg}\
 
         stockChart(stock) {
             if (!stock) return null;
+            const code = this.normalizeCode(stock.code || stock.symbol);
+            const liveChart = this.chartFromHistory('stocks', code);
+            if (liveChart) return liveChart;
             const chart = stock.chart || stock.price_chart || stock.sparkline;
             if (chart) return chart;
-            return this.chartFromHistory('stocks', stock.code)
-                || this.chartFromQuote(stock.price, stock.change_pct);
+            return this.chartFromQuote(stock.price, stock.change_pct);
         },
 
         indexChart(index, code) {
@@ -775,8 +779,62 @@ ${metaTextSvg}\
             return this._isVal(stock?.price) && Number(stock.price) > 0;
         },
 
+        normalizeCode(code) {
+            const raw = String(code ?? '').trim();
+            if (!raw) return '';
+            const body = raw.startsWith('A') && /^\d+$/.test(raw.slice(1)) ? raw.slice(1) : raw;
+            return /^\d+$/.test(body) ? body.padStart(6, '0') : body;
+        },
+
+        upsertLiveQuote(stock, source = 'api') {
+            if (!stock) return null;
+            const code = this.normalizeCode(stock.code || stock.symbol);
+            if (!code) return null;
+            const current = this.liveQuotes[code] || {};
+            const name = stock.name || current.name || this.findStockName(code) || code;
+
+            if (source !== 'ws' && current._source === 'ws') {
+                this.liveQuotes[code] = { ...current, name };
+                this.stocks[code] = { ...(this.stocks[code] || {}), ...this.liveQuotes[code] };
+                return this.liveQuotes[code];
+            }
+
+            const quote = {
+                ...current,
+                code,
+                name,
+                price: stock.price ?? current.price,
+                change_pct: stock.change_pct ?? current.change_pct,
+                cumulative_volume: stock.cumulative_volume ?? current.cumulative_volume,
+                cumulative_trading_value: stock.cumulative_trading_value ?? stock.trading_value ?? current.cumulative_trading_value,
+                strength: stock.strength ?? stock.execution_strength ?? current.strength,
+                timestamp: stock.timestamp ?? current.timestamp,
+                updated_at: stock.updated_at ?? current.updated_at,
+                surge_active: stock.surge_active ?? current.surge_active ?? false,
+                _source: source,
+                _updated_at_ms: Date.now(),
+            };
+            this.liveQuotes[code] = quote;
+            this.stocks[code] = { ...(this.stocks[code] || {}), ...quote };
+            return quote;
+        },
+
+        mergeLiveQuote(stock) {
+            if (!stock) return stock;
+            const code = this.normalizeCode(stock.code || stock.symbol);
+            const live = code ? (this.liveQuotes[code] || this.stocks[code]) : null;
+            if (!live) return { ...stock, code: code || stock.code };
+            return {
+                ...stock,
+                ...live,
+                code,
+                name: stock.name || live.name || this.findStockName(code) || code,
+            };
+        },
+
         compactLeaders(themeData) {
             return [...(themeData?.leaders || [])]
+                .map(stock => this.mergeLiveQuote(stock))
                 .sort((a, b) => {
                     const liveA = this.isLiveStock(a) ? 1 : 0;
                     const liveB = this.isLiveStock(b) ? 1 : 0;
@@ -805,8 +863,9 @@ ${metaTextSvg}\
         themeSortValue(theme, mode) {
             if (!theme) return 0;
             if (mode === 'change_pct') return Number(theme.avg_change_pct) || 0;
+            const leaders = (theme.leaders || []).map(stock => this.mergeLiveQuote(stock));
             if (mode === 'trading_value') {
-                return (theme.leaders || []).reduce((sum, stock) => (
+                return leaders.reduce((sum, stock) => (
                     sum + (Number(stock.cumulative_trading_value) || 0)
                 ), 0);
             }
@@ -1007,8 +1066,7 @@ ${metaTextSvg}\
         alphaForgePicks() {
             if (Array.isArray(this.alphaforgePicksData) && this.alphaforgePicksData.length > 0) {
                 return this.alphaforgePicksData.map(stock => {
-                    const live = this.stocks[stock.code] || {};
-                    const merged = { ...stock, ...live };
+                    const merged = this.mergeLiveQuote(stock);
                     return {
                         ...merged,
                         horizon_setup_label: this.alphaForgeHorizonLabel(merged),
@@ -1020,8 +1078,7 @@ ${metaTextSvg}\
                 const isAlphaForge = themeName === 'AlphaForge' || theme?.display_name === 'AlphaForge';
                 if (!isAlphaForge) continue;
                 for (const stock of theme.leaders || []) {
-                    const live = this.stocks[stock.code] || {};
-                    const merged = { ...stock, ...live };
+                    const merged = this.mergeLiveQuote(stock);
                     picks.push({
                         ...merged,
                         horizon_setup_label: this.alphaForgeHorizonLabel(merged),
@@ -1146,13 +1203,15 @@ ${metaTextSvg}\
         },
 
         liveMomentumPicks() {
-            const alphaByCode = new Map(this.alphaForgePicks().map(s => [s.code, s]));
+            const alphaByCode = new Map(this.alphaForgePicks().map(s => [this.normalizeCode(s.code), s]));
             const rows = Object.values(this.stocks || []).map(stock => {
-                const alpha = alphaByCode.get(stock.code) || {};
+                const code = this.normalizeCode(stock.code);
+                const alpha = alphaByCode.get(code) || {};
                 const merged = {
                     ...alpha,
                     ...stock,
-                    name: alpha.name || this.findStockName(stock.code) || stock.name || stock.code,
+                    code,
+                    name: alpha.name || this.findStockName(code) || stock.name || code,
                 };
                 return {
                     ...merged,
@@ -1169,16 +1228,17 @@ ${metaTextSvg}\
         },
 
         findStockName(code) {
-            if (!code) return '';
-            const mapped = this.symbolNames?.[code];
-            if (mapped && mapped !== code) return mapped;
+            const normalized = this.normalizeCode(code);
+            if (!normalized) return '';
+            const mapped = this.symbolNames?.[normalized];
+            if (mapped && mapped !== normalized) return mapped;
             for (const theme of Object.values(this.themes || {})) {
                 for (const stock of theme.leaders || []) {
-                    if (stock.code === code && stock.name && stock.name !== code) return stock.name;
+                    if (this.normalizeCode(stock.code) === normalized && stock.name && stock.name !== normalized) return stock.name;
                 }
             }
             for (const stock of this.alphaforgePicksData || []) {
-                if (stock.code === code && stock.name && stock.name !== code) return stock.name;
+                if (this.normalizeCode(stock.code) === normalized && stock.name && stock.name !== normalized) return stock.name;
             }
             return '';
         },
@@ -1204,9 +1264,9 @@ ${metaTextSvg}\
         },
 
         overlapPicks() {
-            const alphaCodes = new Set(this.alphaForgePicks().map(stock => stock.code));
+            const alphaCodes = new Set(this.alphaForgePicks().map(stock => this.normalizeCode(stock.code)));
             return this.liveMomentumPicks()
-                .filter(stock => alphaCodes.has(stock.code) && stock.horizon_label === 'SWING_READY')
+                .filter(stock => alphaCodes.has(this.normalizeCode(stock.code)) && stock.horizon_label === 'SWING_READY')
                 .map(stock => ({ ...stock, horizon_label: 'OVERLAP_LEADER' }));
         },
 
@@ -1734,10 +1794,12 @@ ${metaTextSvg}\
                     }
                     for (const theme of Object.values(this.themes || {})) {
                         for (const stock of theme.leaders || []) {
+                            this.upsertLiveQuote(stock, 'api');
                             this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
                         }
                     }
                     for (const stock of this.alphaforgePicksData || []) {
+                        this.upsertLiveQuote(stock, 'api');
                         this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
                     }
                 }
@@ -1805,9 +1867,9 @@ ${metaTextSvg}\
 
             if (msg.type === 'tick') {
                 // Update stock state from WebSocket tick
-                const code = msg.code;
+                const code = this.normalizeCode(msg.code);
                 const priorName = this.stocks[code]?.name;
-                this.stocks[code] = {
+                const quote = {
                     code: code,
                     name: priorName || this.findStockName(code) || code,
                     price: msg.price,
@@ -1818,6 +1880,7 @@ ${metaTextSvg}\
                     timestamp: this.formatTime(msg.timestamp),
                     surge_active: this.stocks[code]?.surge_active || false,
                 };
+                this.upsertLiveQuote(quote, 'ws');
 
                 console.log(`💹 ${code}: ${msg.price} (${msg.change_pct >= 0 ? '+' : ''}${msg.change_pct.toFixed(2)}%)`);
                 this.recordChartPoint('stocks', code, msg.price, msg.change_pct);
@@ -1829,7 +1892,7 @@ ${metaTextSvg}\
 
             if (msg.type === 'surge') {
                 // Handle surge detection
-                const code = msg.code;
+                const code = this.normalizeCode(msg.code);
                 console.log(`⚡ SURGE: ${code} @ ${msg.price} | Vol: ${msg.volume}`);
 
                 // Mark as surge active
@@ -1856,19 +1919,20 @@ ${metaTextSvg}\
 
         updateThemesWithTick(code) {
             // Update the stock data in each theme
+            const normalized = this.normalizeCode(code);
             for (const themeName in this.themes) {
                 const theme = this.themes[themeName];
                 if (theme.leaders) {
                     for (const leader of theme.leaders) {
-                        if (leader.code === code && this.stocks[code]) {
+                        if (this.normalizeCode(leader.code) === normalized && this.liveQuotes[normalized]) {
                             // Update leader with latest tick, preserving surge_active
                             const surgeState = leader.surge_active;
-                            Object.assign(leader, this.stocks[code]);
+                            Object.assign(leader, this.mergeLiveQuote(leader));
                             if (surgeState) leader.surge_active = surgeState;
                         }
                     }
                     // Recompute theme strength
-                    theme.strength = this.computeThemeStrength(theme.leaders);
+                    theme.strength = this.computeThemeStrength(theme.leaders.map(stock => this.mergeLiveQuote(stock)));
                 }
             }
         },
