@@ -778,7 +778,7 @@ ${nodes}\
             const bodyH = neutral ? 6 : Math.max(4, Math.abs(yOpen - yClose));
             const wickTop = neutral ? Math.max(3, bodyY - 4) : Math.min(yHigh, yLow);
             const wickBottom = neutral ? Math.min(H - 10, bodyY + bodyH + 4) : Math.max(yHigh, yLow);
-            const title = `state candle: ${label}, open ${this.formatStatePrice(model.open)}, close ${this.formatStatePrice(model.close)}`;
+            const title = `state candle: ${label}, source: ${model.source || 'price'}, bars: ${model.bars || 0}, open ${this.formatStatePrice(model.open)}, close ${this.formatStatePrice(model.close)}`;
             return `\
 <div class="state-candle-wrap" title="${title}">\
 <svg class="state-candle" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
@@ -867,10 +867,10 @@ ${nodes}\
                 const low = Number(bar.low);
                 if (count < 2 || !Number.isFinite(open) || !Number.isFinite(close) || open <= 0 || close <= 0) {
                     const price = Number(close || open || stock?.price || 0);
-                    return this.neutralStateCandle(price, price > 0 ? '현재가' : '수집중', bar);
+                    return this.neutralStateCandle(price, price > 0 ? '현재가' : '수집중', { ...bar, bars: selectedBars.length || oneMinuteBars.length });
                 }
                 if (!intervalReady) {
-                    return this.neutralStateCandle(close, '현재가', bar);
+                    return this.neutralStateCandle(close, '현재가', { ...bar, bars: selectedBars.length || oneMinuteBars.length });
                 }
                 return {
                     status: 'OK',
@@ -882,6 +882,8 @@ ${nodes}\
                     amount: Number(bar.amount) || 0,
                     strength: Number(bar.strength || stock?.strength || stock?.execution_strength) || 0,
                     count,
+                    source: bar.source || 'bar',
+                    bars: selected === '5m' && label === '5m→1m' ? oneMinuteBars.length : selectedBars.length,
                 };
             }
 
@@ -902,6 +904,8 @@ ${nodes}\
                 amount: Number(source.amount) || 0,
                 strength: Number(source.strength) || 0,
                 count: Number(source.count) || 0,
+                source: source.source || source._source || (safe > 1 ? 'price' : 'none'),
+                bars: Number(source.bars) || 0,
             };
         },
 
@@ -1235,16 +1239,25 @@ ${markers}\
 
         updateBarsFromQuote(code, quote, source = 'quote') {
             const normalized = this.normalizeCode(code);
-            const price = Number(quote?.price ?? quote?.current_price ?? quote?.last_price);
+            const price = Number(
+                quote?.price
+                ?? quote?.current_price
+                ?? quote?.current
+                ?? quote?.last_price
+                ?? quote?.last
+                ?? quote?.close
+            );
             if (!normalized || !Number.isFinite(price) || price <= 0) return;
 
-            const rawTime = quote?.timestamp || quote?.updated_at || quote?.t;
+            const rawTime = source === 'ws' ? (quote?.timestamp || quote?.updated_at || quote?.t) : null;
             const parsedTime = rawTime ? Date.parse(rawTime) : NaN;
-            const now = Number.isFinite(parsedTime) ? parsedTime : Date.now();
+            const now = source === 'ws' && Number.isFinite(parsedTime) ? parsedTime : Date.now();
             const cumulativeAmount = Number(
                 quote?.cumulative_trading_value
                 ?? quote?.volume_amount
                 ?? quote?.trading_value
+                ?? quote?.value
+                ?? quote?.amount_value
                 ?? quote?.amount
             ) || 0;
             const previousAmount = Number(this.liveQuotes[normalized]?.cumulative_trading_value) || 0;
