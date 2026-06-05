@@ -778,7 +778,15 @@ ${nodes}\
             const bodyH = neutral ? 6 : Math.max(4, Math.abs(yOpen - yClose));
             const wickTop = neutral ? Math.max(3, bodyY - 4) : Math.min(yHigh, yLow);
             const wickBottom = neutral ? Math.min(H - 10, bodyY + bodyH + 4) : Math.max(yHigh, yLow);
-            const title = `state candle: ${label}, source: ${model.source || 'price'}, bars: ${model.bars || 0}, open ${this.formatStatePrice(model.open)}, close ${this.formatStatePrice(model.close)}`;
+            const title = [
+                `state candle: ${label}${label === '1m' || label === '5m' ? ' current bucket' : ''}`,
+                `O ${this.formatStatePrice(model.open)}`,
+                `H ${this.formatStatePrice(model.high)}`,
+                `L ${this.formatStatePrice(model.low)}`,
+                `C ${this.formatStatePrice(model.close)}`,
+                `source ${model.source || 'current'}`,
+                `bars ${model.bars || 0}`,
+            ].join(' / ');
             return `\
 <div class="state-candle-wrap" title="${title}">\
 <svg class="state-candle" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
@@ -794,14 +802,15 @@ ${nodes}\
             const H = Number(options.height) || 28;
             const limit = Number(options.limit) || 16;
             const chart = this.trendLineChart(stock);
-            const source = chart?.source || 'fallback_flat';
+            const source = chart?.source || 'current';
+            const trendLabel = chart?.trend_label || '현재가 flat';
             let points = this.chartPoints(chart).slice(-limit);
             if (points.length === 0) {
                 const flat = this.chartFromQuote(stock?.price, stock?.change_pct);
                 points = this.chartPoints(flat).slice(-2);
             }
             if (points.length === 0) {
-                return this.placeholderMiniSvg(W, H, 'trend source: placeholder', 'trend');
+                return this.placeholderMiniSvg(W, H, 'trend: 수집중', 'trend');
             }
             if (points.length === 1) {
                 const p = Number(points[0].p);
@@ -809,7 +818,7 @@ ${nodes}\
             }
             const values = points.map(p => Number(p.p)).filter(v => Number.isFinite(v) && v > 0);
             if (values.length === 0) {
-                return this.placeholderMiniSvg(W, H, 'trend source: placeholder', 'trend');
+                return this.placeholderMiniSvg(W, H, 'trend: 수집중', 'trend');
             }
 
             const yOf = this.miniYScale(values, H, 4, 4, 0.004);
@@ -818,8 +827,8 @@ ${nodes}\
             const first = Number(points[0].p);
             const last = Number(points[points.length - 1].p);
             const color = last >= first ? '#D81E26' : '#1A5CDD';
-            const muted = source === 'fallback_flat' || source === 'placeholder';
-            const title = `trend source: ${source}, points: ${points.length}`;
+            const muted = source === 'current' || source === 'placeholder';
+            const title = `trend: ${trendLabel}, points ${points.length}, source ${source}`;
             return `\
 <svg class="mini-trend-line" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
 <title>${title}</title>\
@@ -833,13 +842,23 @@ ${nodes}\
             const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
             const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
             const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
-            if (selectedBars.length >= 2) return this.barChartForCode(code, selected, `bar_${selected}`);
-            if (selected === '5m' && oneMinuteBars.length >= 2) return this.barChartForCode(code, '1m', 'fallback_1m');
-            if (selectedBars.length === 1) return this.barChartForCode(code, selected, 'fallback_single_bar');
-            if (selected === '5m' && oneMinuteBars.length === 1) return this.barChartForCode(code, '1m', 'fallback_single_bar');
+            if (selectedBars.length >= 2) {
+                return this.barChartForCode(code, selected, this.barSourceLabel(selectedBars), `${selected} close`);
+            }
+            if (selected === '5m' && oneMinuteBars.length >= 2) {
+                return this.barChartForCode(code, '1m', this.barSourceLabel(oneMinuteBars), '5m→1m close');
+            }
+            if (selectedBars.length === 1) {
+                return this.barChartForCode(code, selected, this.barSourceLabel(selectedBars) || 'current', '현재가 flat');
+            }
+            if (selected === '5m' && oneMinuteBars.length === 1) {
+                return this.barChartForCode(code, '1m', this.barSourceLabel(oneMinuteBars) || 'current', '현재가 flat');
+            }
+            const flat = this.chartFromQuote(stock.price, stock.change_pct);
+            if (flat) return { ...flat, source: 'current', trend_label: '현재가 flat' };
             const tickFallback = this.chartFromHistory('stocks', code);
-            if (tickFallback) return tickFallback;
-            return this.chartFromQuote(stock.price, stock.change_pct);
+            if (tickFallback) return { ...tickFallback, source: 'tick', trend_label: 'tick close' };
+            return null;
         },
 
         stateCandleModel(stock) {
@@ -882,7 +901,7 @@ ${nodes}\
                     amount: Number(bar.amount) || 0,
                     strength: Number(bar.strength || stock?.strength || stock?.execution_strength) || 0,
                     count,
-                    source: bar.source || 'bar',
+                    source: this.barSourceLabel(label === '5m→1m' ? oneMinuteBars : selectedBars) || bar.source || 'bar',
                     bars: selected === '5m' && label === '5m→1m' ? oneMinuteBars.length : selectedBars.length,
                 };
             }
@@ -921,6 +940,13 @@ ${nodes}\
         formatStatePrice(price) {
             const p = Number(price);
             return Number.isFinite(p) && p > 0 ? Math.round(p).toLocaleString('ko-KR') : '-';
+        },
+
+        barSourceLabel(bars) {
+            const sources = [...new Set((bars || [])
+                .flatMap(bar => Array.isArray(bar.sources) && bar.sources.length ? bar.sources : [bar.source])
+                .filter(Boolean))];
+            return sources.join('+');
         },
 
         renderMiniChartPair(stock, options = {}) {
@@ -1291,6 +1317,7 @@ ${markers}\
                     strength,
                     count: 1,
                     source,
+                    sources: source ? [source] : [],
                     _hasWs: source === 'ws',
                     _lastQuoteKeys: { [source]: quoteKey },
                 };
@@ -1308,13 +1335,18 @@ ${markers}\
                 }
                 bar.strength = strength || bar.strength;
                 bar.source = source || bar.source;
+                if (source) {
+                    const sources = Array.isArray(bar.sources) ? bar.sources : (bar.source ? [bar.source] : []);
+                    if (!sources.includes(source)) sources.push(source);
+                    bar.sources = sources;
+                }
                 bar._hasWs = !!bar._hasWs || source === 'ws';
                 if (quoteKey) lastKeys[source] = quoteKey;
             }
             if (bars.length > 60) bars.splice(0, bars.length - 60);
         },
 
-        barChartForCode(code, interval = '1m', source = '') {
+        barChartForCode(code, interval = '1m', source = '', trendLabel = '') {
             const normalized = this.normalizeCode(code);
             const selected = interval === '5m' ? '5m' : '1m';
             const bars = (this.barSeriesByCode[normalized]?.[selected] || []).slice(-40);
@@ -1330,6 +1362,7 @@ ${markers}\
             return {
                 status: 'OK',
                 source: source || `bar_${selected}`,
+                trend_label: trendLabel || `${selected} close`,
                 interval: selected,
                 bars,
                 points,
