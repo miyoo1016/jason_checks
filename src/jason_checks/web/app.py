@@ -75,6 +75,121 @@ def _normalize_symbol(code: object) -> str:
     return value
 
 
+_US_MACRO_TICKERS = {
+    "VIX": {
+        "ticker": "^VIX",
+        "name": "CBOE Volatility Index",
+        "source": "yahoo:^VIX",
+    },
+    "US10Y": {
+        "ticker": "^TNX",
+        "name": "US 10Y Treasury Yield",
+        "source": "yahoo:^TNX",
+    },
+    "USDKRW": {
+        "ticker": "KRW=X",
+        "name": "USD/KRW",
+        "source": "yahoo:KRW=X",
+    },
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _as_float(value) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        parsed = float(value)
+        return parsed if parsed == parsed else None
+    except Exception:
+        return None
+
+
+def _normalize_us10y_price(symbol: str, price: float | None) -> float | None:
+    if price is None:
+        return None
+    # Yahoo ^TNX may be reported as 44.7 for 4.47%.
+    if symbol == "US10Y" and price > 20:
+        return price / 10.0
+    return price
+
+
+async def _fetch_us_macro_row(symbol: str, item: dict, session_status: str) -> dict:
+    import httpx
+
+    cfg = _US_MACRO_TICKERS[symbol]
+    ticker = cfg["ticker"]
+    source = cfg["source"]
+    updated_at = _utc_now_iso()
+    row = {
+        "symbol": symbol,
+        "name": item.get("name") or cfg["name"],
+        "category": item.get("category"),
+        "benchmark": item.get("benchmark"),
+        "role": item.get("role"),
+        "price": None,
+        "change_pct": None,
+        "status": "DATA_NA",
+        "source": source,
+        "updated_at": updated_at,
+        "session_status": session_status,
+    }
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"range": "5d", "interval": "1d"}
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, headers=headers) as client:
+            resp = await client.get(url, params=params)
+        if resp.status_code != 200:
+            row["error"] = f"fetch_failed: http_{resp.status_code}"
+            logger.warning("us_watchlist_macro", symbol=symbol, status="DATA_NA", source=source, reason=row["error"])
+            return row
+
+        payload = resp.json()
+        result = ((payload.get("chart") or {}).get("result") or [None])[0] or {}
+        meta = result.get("meta") or {}
+        quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+        closes = [_as_float(v) for v in (quote.get("close") or [])]
+        closes = [v for v in closes if v is not None and v > 0]
+
+        raw_price = (
+            _as_float(meta.get("regularMarketPrice"))
+            or _as_float(meta.get("postMarketPrice"))
+            or _as_float(meta.get("preMarketPrice"))
+            or (closes[-1] if closes else None)
+        )
+        raw_prev = (
+            _as_float(meta.get("chartPreviousClose"))
+            or _as_float(meta.get("previousClose"))
+            or (closes[-2] if len(closes) >= 2 else None)
+        )
+        price = _normalize_us10y_price(symbol, raw_price)
+        prev = _normalize_us10y_price(symbol, raw_prev)
+
+        if price is None or price <= 0:
+            row["error"] = "fetch_failed: missing_price"
+            logger.warning("us_watchlist_macro", symbol=symbol, status="DATA_NA", source=source, reason=row["error"])
+            return row
+
+        row["price"] = round(price, 4 if symbol in ("US10Y", "USDKRW") else 2)
+        row["previous_close"] = round(prev, 4 if symbol in ("US10Y", "USDKRW") else 2) if prev else None
+        if prev and prev > 0:
+            row["change_pct"] = round(((price - prev) / prev) * 100.0, 4)
+        row["status"] = "OK"
+        logger.info("us_watchlist_macro", symbol=symbol, status="OK", price=row["price"], source=source)
+        return row
+    except Exception as e:
+        row["error"] = f"fetch_failed: {type(e).__name__}: {str(e)[:160]}"
+        logger.warning("us_watchlist_macro", symbol=symbol, status="DATA_NA", source=source, reason=row["error"])
+        return row
+
+
 def _sanitize_guard_value(value):
     """Remove sensitive-looking keys before exposing guard reports."""
     if isinstance(value, dict):
@@ -829,22 +944,28 @@ def create_app() -> FastAPI:
         if not items:
             return {"available": False, "reason": "us_watchlist.json is empty"}
 
-        async def _fetch(sym):
+        sess = get_session_status(market="US")
+
+        async def _fetch(item):
+            sym = str(item.get("symbol") or "").strip().upper()
             if sym in ("VIX", "US10Y", "USDKRW"):
-                return {"symbol": sym, "price": None, "change_pct": None}
+                return await _fetch_us_macro_row(sym, item, sess)
             try:
                 res = await fetch_overseas_price(sym)
                 if res:
-                    return {"symbol": sym, "price": res.get("price"), "change_pct": res.get("change_pct")}
-            except:
+                    return {
+                        "symbol": sym,
+                        "price": res.get("price"),
+                        "change_pct": res.get("change_pct"),
+                    }
+            except Exception:
                 pass
             return {"symbol": sym, "price": None, "change_pct": None}
 
-        tasks = [_fetch(item["symbol"]) for item in items]
+        tasks = [_fetch(item) for item in items]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         rows = [r for r in results if isinstance(r, dict)]
 
-        sess = get_session_status(market="US")
         _us_cache["data"] = rows
         _us_cache["updated_at"] = now
         _us_cache["session_status"] = sess
