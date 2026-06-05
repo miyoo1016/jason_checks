@@ -12,6 +12,76 @@
     <link rel="stylesheet" href="/static/css/checks.css">
     <style>
         [x-cloak] { display: none !important; }
+        .sector-grid {
+            display: grid !important;
+            grid-template-columns: 1fr !important;
+            gap: 12px !important;
+        }
+        @media (min-width: 800px) and (max-width: 1099px) {
+            .sector-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+        }
+        @media (min-width: 1100px) and (max-width: 1399px) {
+            .sector-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+        }
+        @media (min-width: 1400px) {
+            .sector-grid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+        }
+        .leader-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 128px;
+            gap: 6px;
+            align-items: center;
+            padding: 0.42rem 0.5rem;
+        }
+        .leader-info { min-width: 0; }
+        .leader-top {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 4px;
+            min-width: 0;
+        }
+        .leader-name {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            max-width: none;
+            word-break: keep-all;
+            line-height: 1.18;
+        }
+        .leader-code { flex-shrink: 0; }
+        .leader-mid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            margin-top: 3px;
+        }
+        .state-candle-box {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            min-width: 38px;
+        }
+        .leader-chart-mini {
+            display: grid;
+            grid-template-columns: 38px 84px;
+            gap: 6px;
+            align-items: center;
+            justify-content: end;
+            min-width: 0;
+        }
+        .trend-line-box {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            min-width: 0;
+        }
+        .state-candle-wrap,
+        .state-candle,
+        .mini-trend-line {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -464,6 +534,14 @@
                                 <span class="text-sm font-black text-slate-800">AlphaForge Picks <span class="text-[10px] text-fuchsia-600 bg-fuchsia-50 px-1 py-0.5 rounded ml-1 font-bold" x-text="alphaForgeAgeBadge()"></span></span>
                                 <span class="mono text-[10px] font-black text-blue-700 bg-blue-50 rounded px-1.5 py-0.5"
                                       x-text="`${alphaForgePicks().length}개`"></span>
+                                <div class="flex rounded border border-gray-200 overflow-hidden text-[9px] mono font-black">
+                                    <button class="px-1.5 py-0.5"
+                                            :class="miniChartInterval === '1m' ? 'bg-slate-800 text-white' : 'bg-white text-gray-500'"
+                                            @click="setMiniChartInterval('1m')">1m</button>
+                                    <button class="px-1.5 py-0.5 border-l border-gray-200"
+                                            :class="miniChartInterval === '5m' ? 'bg-slate-800 text-white' : 'bg-white text-gray-500'"
+                                            @click="setMiniChartInterval('5m')">5m</button>
+                                </div>
                             </div>
                             <span class="text-[10px] text-gray-500">실시간 조건부 매수 의사결정 보조</span>
                         </div>
@@ -471,10 +549,10 @@
                             <template x-for="stock in alphaForgePicks().slice(0, 5)" :key="`af-row-${stock.code}`">
                                 <div class="bg-white rounded border border-gray-200 p-2 hover:bg-slate-50 transition-colors flex flex-col gap-1.5">
                                     <!-- Top Line (Info / Badges / Sparkline) -->
-                                    <div class="grid grid-cols-[minmax(0,1fr)_auto_64px] gap-3 items-center">
+                                    <div class="grid grid-cols-[minmax(0,1fr)_auto_142px] gap-3 items-center">
                                         <!-- Left Info -->
                                         <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                            <span class="text-[11px] font-black text-slate-900" x-text="stock.name"></span>
+                                            <span class="text-[11px] font-black text-slate-900" :title="stock.name" x-text="stock.name"></span>
                                             <span class="text-[8px] text-gray-400 mono" x-text="stock.code"></span>
                                             <span class="text-[8px] font-bold text-gray-400 bg-gray-50 rounded px-1 py-0.2" x-text="`Tier ${stock.tier || '-'}`"></span>
                                             <span class="mono font-black text-[11px] ml-2"
@@ -509,8 +587,11 @@
                                             <span x-show="stock.de_max_pct > 0" class="px-1 py-0.5 rounded text-[8px] font-bold bg-slate-100 text-slate-700"
                                                   x-text="`비중 ${stock.de_max_pct}%`"></span>
                                         </div>
-                                        <!-- Right Sparkline -->
-                                        <div class="w-[64px] h-[20px] justify-self-end bg-slate-50 rounded" x-html="sparklineSvg(stockChart(stock), 64, 20)"></div>
+                                        <!-- Right State Candle + Trend -->
+                                        <div class="leader-chart-mini justify-self-end bg-slate-50 rounded px-1 py-0.5">
+                                            <div x-html="renderStateCandle(stock, { width: 38, height: 34 })"></div>
+                                            <div x-html="renderMiniTrendLine(stock, { width: 88, height: 28, limit: 18 })"></div>
+                                        </div>
                                     </div>
                                     <!-- Bottom Info (no_buy_reason / next_session_trigger / invalidation) -->
                                     <div class="text-[9px] leading-relaxed pt-1.5 border-t border-dashed border-gray-100 grid grid-cols-1 md:grid-cols-2 gap-2 text-gray-700">
@@ -586,7 +667,7 @@
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-2 mb-4">
+                    <div class="sector-grid mb-4">
                         <template x-for="entry in sortedThemeEntries()" :key="entry[0]">
                             <div class="theme-card" x-data="{ themeName: entry[0], themeData: entry[1] }"
                                  style="padding: 0.45rem; border-radius: 7px;">
@@ -615,28 +696,35 @@
                                     <template x-for="stock in compactLeaders(themeData)" :key="stock.code">
                                         <div class="stock-row"
                                              :class="{ 'limit-up': stock.change_pct >= 29.5, 'opacity-50': !isLiveStock(stock) }"
-                                             style="padding: 0.23rem 0.35rem; margin-bottom: 0.125rem; border-radius: 5px;">
-                                            <div class="grid grid-cols-[minmax(0,1fr)_52px_44px_44px] gap-1.5 items-center leading-tight">
-                                                <div class="min-w-0 flex items-baseline gap-1">
-                                                    <span class="text-[10px] font-black truncate" x-text="stock.name"></span>
-                                                    <span x-show="stock.surge_active" class="surge-indicator">▲</span>
-                                                    <span class="text-[7px] text-gray-400 mono flex-shrink-0" x-text="stock.code"></span>
+                                             style="padding: 0; margin-bottom: 0.125rem; border-radius: 5px;">
+                                            <div class="leader-row leading-tight">
+                                                <div class="leader-info">
+                                                    <div class="leader-top">
+                                                        <span class="leader-name text-[10px] font-black text-slate-900" :title="stock.name" x-text="stock.name"></span>
+                                                        <span x-show="stock.surge_active" class="surge-indicator">▲</span>
+                                                        <span class="leader-code text-[7px] text-gray-400 mono" x-text="stock.code"></span>
+                                                    </div>
+                                                    <div class="leader-mid mono">
+                                                        <span class="text-[10px] font-black"
+                                                              :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                              x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') : '-'"></span>
+                                                        <span class="text-[9px] font-black"
+                                                              :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
+                                                              x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></span>
+                                                        <span class="text-[8px] font-black text-gray-600"
+                                                              x-text="isLiveStock(stock) ? formatTradingValue(stock.cumulative_trading_value) : '-'"></span>
+                                                        <span class="text-[8px] font-black text-gray-600"
+                                                              x-text="`체결 ${formatStrength(stock.strength)}`"></span>
+                                                        <span class="text-[7px] text-gray-400"
+                                                              x-text="supplyBadge(stock)"></span>
+                                                    </div>
                                                 </div>
-                                                <div class="text-right text-[10px] mono font-black"
-                                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
-                                                     x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') : '-'"></div>
-                                                <div class="text-right text-[9px] mono font-black"
-                                                     :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
-                                                     x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></div>
-                                                <div class="text-right text-[9px] mono font-black text-gray-600"
-                                                     x-text="isLiveStock(stock) ? formatTradingValue(stock.cumulative_trading_value) : '-'"></div>
-                                            </div>
-                                            <div class="mt-0.5 grid grid-cols-[46px_minmax(0,1fr)_64px] gap-1 items-center leading-none">
-                                                <span class="text-[8px] mono font-black text-gray-600"
-                                                      x-text="`체결 ${formatStrength(stock.strength)}`"></span>
-                                                <span class="text-[7px] text-gray-400 truncate"
-                                                      x-text="supplyBadge(stock)"></span>
-                                                <div class="w-[64px] h-[18px] justify-self-end" x-html="sparklineSvg(stockChart(stock), 64, 18)"></div>
+                                                <div class="leader-chart-mini bg-slate-50 rounded px-1 py-0.5">
+                                                    <div class="state-candle-box"
+                                                         x-html="renderStateCandle(stock, { width: 36, height: 34 })"></div>
+                                                    <div class="trend-line-box"
+                                                         x-html="renderMiniTrendLine(stock, { width: 84, height: 28, limit: 14 })"></div>
+                                                </div>
                                             </div>
                                         </div>
                                     </template>

@@ -36,6 +36,8 @@ function timaApp() {
         themes: {},
         stocks: {},
         liveQuotes: {},
+        barSeriesByCode: {},
+        miniChartInterval: '1m',
         symbolNames: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
         wsConnected: false,
@@ -100,6 +102,7 @@ function timaApp() {
             this.loadPinnedThemes();
             this.loadSortMode();
             this.loadSurgeSortMode();
+            this.loadMiniChartInterval();
 
             // ── Market persistence: URL query > localStorage > default KR ──
             const targetMarket = this._getInitialMarket();
@@ -575,18 +578,20 @@ function timaApp() {
             const W  = Number(width)  || 120;
             const H  = Number(height) || 32;
             const status = chart && chart.status;
+            const title = this.chartTitle(chart);
 
             // ── placeholder (DATA_NA / collecting) ─────────────────────────
             const midY = (H / 2 + 0.5).toFixed(1);
             const placeholder = (label, cls) => `\
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
-<title>${label}</title>\
+<title>${this.chartTitle(chart, label)}</title>\
 <line x1="0" y1="${midY}" x2="${W}" y2="${midY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 3"/>\
 </svg>`;
 
             if (!chart || status === 'DATA_NA') return placeholder('DATA_NA', '#94a3b8');
             let pts = Array.isArray(chart.points) ? chart.points : [];
             if (status !== 'OK' || pts.length < 2) return placeholder('collecting', '#94a3b8');
+            const bars = Array.isArray(chart.bars) ? chart.bars : [];
 
             let isBucketed = false;
             let hasTimestamps = pts.every(p => p.t);
@@ -660,25 +665,432 @@ function timaApp() {
 
             // ── colour: green if last >= baseline (or first point) ─────────
             const up     = Number.isFinite(baseline) ? last >= baseline : last >= ys[0];
-            const stroke = up ? '#16a34a' : '#dc2626';
-            const fill   = up ? 'rgba(22,163,74,0.12)' : 'rgba(220,38,38,0.12)';
+            const stroke = up ? '#D81E26' : '#1A5CDD';
+            const fill   = up ? 'rgba(216,30,38,0.12)' : 'rgba(26,92,221,0.12)';
 
             // ── SVG path ───────────────────────────────────────────────────
             const linePath = ys.map((v, i) => `${i === 0 ? 'M' : 'L'}${xOf(i)},${yOf(v)}`).join(' ');
             const areaPath = `M${xOf(0)},${H} ` +
                              ys.map((v, i) => `L${xOf(i)},${yOf(v)}`).join(' ') +
                              ` L${xOf(ys.length - 1)},${H} Z`;
-
-            const metaTextSvg = isBucketed ? `<text x="${W - 2}" y="${H - 2}" font-size="9" fill="#94a3b8" text-anchor="end" opacity="0.8">5m</text>` : '';
+            const volMax = Math.max(...bars.map(b => Number(b.amount) || 0), 0);
+            const volSvg = volMax > 0 ? bars.map((b, i) => {
+                const amount = Number(b.amount) || 0;
+                const x = Number(xOf(Math.min(i, ys.length - 1))) - 0.8;
+                const h = Math.max(1, (amount / volMax) * Math.max(3, H * 0.22));
+                const y = H - h;
+                const color = Number(b.close) >= Number(b.open) ? '#D81E26' : '#1A5CDD';
+                return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="1.6" height="${h.toFixed(1)}" fill="${color}" opacity="0.28"/>`;
+            }).join('') : '';
 
             return `\
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
+<title>${title}</title>\
 ${baselineSvg}\
+${volSvg}\
 <path d="${areaPath}" fill="${fill}" stroke="none"/>\
 <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>\
 <circle cx="${xOf(ys.length - 1)}" cy="${yOf(last)}" r="2" fill="${stroke}"/>\
-${metaTextSvg}\
 </svg>`;
+        },
+
+        miniCandleSvg(chart, width, height, limit = 24) {
+            const W = Number(width) || 96;
+            const H = Number(height) || 28;
+            const bars = Array.isArray(chart?.bars) ? chart.bars.slice(-limit) : [];
+            if (chart?.status !== 'OK' || bars.length < 1) {
+                return this.sparklineSvg(chart, W, H);
+            }
+            const prices = bars.flatMap(b => [Number(b.high), Number(b.low), Number(b.open), Number(b.close)])
+                .filter(v => Number.isFinite(v) && v > 0);
+            if (prices.length < 2) return this.sparklineSvg(chart, W, H);
+            const rawMin = Math.min(...prices);
+            const rawMax = Math.max(...prices);
+            const last = Number(bars[bars.length - 1].close) || rawMax;
+            const minRange = Math.abs(last) * 0.002;
+            const range = Math.max(rawMax - rawMin, minRange);
+            const mid = (rawMax + rawMin) / 2;
+            const lo = mid - range / 2;
+            const hi = mid + range / 2;
+            const topPad = 2;
+            const volH = Math.max(4, H * 0.22);
+            const priceH = H - volH - 1;
+            const yOf = (v) => {
+                const frac = (hi - Number(v)) / (hi - lo);
+                return (topPad + Math.min(Math.max(frac, 0), 1) * Math.max(4, priceH - topPad)).toFixed(1);
+            };
+            const step = W / bars.length;
+            const bodyW = Math.max(1.5, Math.min(4, step * 0.52));
+            const volMax = Math.max(...bars.map(b => Number(b.amount) || 0), 0);
+            const nodes = bars.map((b, i) => {
+                const x = i * step + step / 2;
+                const open = Number(b.open);
+                const close = Number(b.close);
+                const high = Number(b.high);
+                const low = Number(b.low);
+                const up = close >= open;
+                const color = up ? '#D81E26' : '#1A5CDD';
+                const yOpen = Number(yOf(open));
+                const yClose = Number(yOf(close));
+                const yBody = Math.min(yOpen, yClose);
+                const hBody = Math.max(1.2, Math.abs(yOpen - yClose));
+                const amount = Number(b.amount) || 0;
+                const vh = volMax > 0 ? Math.max(1, (amount / volMax) * volH) : 0;
+                const vy = H - vh;
+                return `\
+<line x1="${x.toFixed(1)}" y1="${yOf(high)}" x2="${x.toFixed(1)}" y2="${yOf(low)}" stroke="${color}" stroke-width="1" opacity="0.9"/>\
+<rect x="${(x - bodyW / 2).toFixed(1)}" y="${yBody.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${hBody.toFixed(1)}" fill="${color}" opacity="${up ? '0.65' : '0.75'}"/>\
+${vh ? `<rect x="${(x - bodyW / 2).toFixed(1)}" y="${vy.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${vh.toFixed(1)}" fill="${color}" opacity="0.25"/>` : ''}`;
+            }).join('');
+            return `\
+<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="spark-svg">\
+<title>${this.chartTitle(chart)}</title>\
+${nodes}\
+</svg>`;
+        },
+
+        renderMiniChartPack(stock, options = {}) {
+            return this.renderMiniChartPair(stock, options);
+        },
+
+        renderStateCandle(stock, options = {}) {
+            const model = this.stateCandleModel(stock);
+            const W = Number(options.width) || 40;
+            const H = Number(options.height) || 34;
+            const candleX = Math.round(W * 0.38);
+            const label = model.label || '수집중';
+            const neutral = model.status !== 'OK';
+            const up = Number(model.close) >= Number(model.open);
+            const color = neutral ? '#94a3b8' : (up ? '#D81E26' : '#1A5CDD');
+            const opacity = neutral ? 0.55 : 0.9;
+            const bodyW = neutral ? 6 : this.stateCandleBodyWidth(model);
+            const values = [model.open, model.high, model.low, model.close]
+                .map(Number)
+                .filter(v => Number.isFinite(v) && v > 0);
+            const yOf = values.length
+                ? this.miniYScale(values, H - 7, 3, 3, 0.004)
+                : (() => (H - 7) / 2);
+            const yOpen = yOf(Number(model.open));
+            const yClose = yOf(Number(model.close));
+            const yHigh = yOf(Number(model.high));
+            const yLow = yOf(Number(model.low));
+            const bodyY = neutral ? Math.max(3, (H - 7) / 2 - 3) : Math.min(yOpen, yClose);
+            const bodyH = neutral ? 6 : Math.max(4, Math.abs(yOpen - yClose));
+            const wickTop = neutral ? Math.max(3, bodyY - 4) : Math.min(yHigh, yLow);
+            const wickBottom = neutral ? Math.min(H - 10, bodyY + bodyH + 4) : Math.max(yHigh, yLow);
+            const title = `state candle: ${label}, open ${this.formatStatePrice(model.open)}, close ${this.formatStatePrice(model.close)}`;
+            return `\
+<div class="state-candle-wrap" title="${title}">\
+<svg class="state-candle" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<line x1="${candleX}" y1="${wickTop.toFixed(1)}" x2="${candleX}" y2="${wickBottom.toFixed(1)}" stroke="${color}" stroke-width="1.5" stroke-linecap="round" opacity="${opacity}"/>\
+<rect x="${(candleX - bodyW / 2).toFixed(1)}" y="${bodyY.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1.4" fill="${color}" opacity="${opacity}"/>\
+<text x="${W - 1}" y="${H - 2}" font-size="8" fill="#64748b" text-anchor="end" font-weight="700">${label}</text>\
+</svg>\
+</div>`;
+        },
+
+        renderMiniTrendLine(stock, options = {}) {
+            const W = Number(options.width) || 88;
+            const H = Number(options.height) || 28;
+            const limit = Number(options.limit) || 16;
+            const chart = this.trendLineChart(stock);
+            const source = chart?.source || 'fallback_flat';
+            let points = this.chartPoints(chart).slice(-limit);
+            if (points.length === 0) {
+                const flat = this.chartFromQuote(stock?.price, stock?.change_pct);
+                points = this.chartPoints(flat).slice(-2);
+            }
+            if (points.length === 0) {
+                return this.placeholderMiniSvg(W, H, 'trend source: placeholder', 'trend');
+            }
+            if (points.length === 1) {
+                const p = Number(points[0].p);
+                points = [{ t: Number(points[0].t) - 60000, p }, { t: Number(points[0].t), p }];
+            }
+            const values = points.map(p => Number(p.p)).filter(v => Number.isFinite(v) && v > 0);
+            if (values.length === 0) {
+                return this.placeholderMiniSvg(W, H, 'trend source: placeholder', 'trend');
+            }
+
+            const yOf = this.miniYScale(values, H, 4, 4, 0.004);
+            const xOf = (i) => 2 + (i / Math.max(1, points.length - 1)) * (W - 4);
+            const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(Number(p.p)).toFixed(1)}`).join(' ');
+            const first = Number(points[0].p);
+            const last = Number(points[points.length - 1].p);
+            const color = last >= first ? '#D81E26' : '#1A5CDD';
+            const muted = source === 'fallback_flat' || source === 'placeholder';
+            const title = `trend source: ${source}, points: ${points.length}`;
+            return `\
+<svg class="mini-trend-line" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<title>${title}</title>\
+<path d="${path}" fill="none" stroke="${muted ? '#94a3b8' : color}" stroke-width="${muted ? '1.2' : '1.7'}" stroke-linejoin="round" stroke-linecap="round" opacity="${muted ? '0.65' : '0.95'}"/>\
+</svg>`;
+        },
+
+        trendLineChart(stock) {
+            if (!stock) return null;
+            const code = this.normalizeCode(stock.code || stock.symbol);
+            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
+            const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
+            if (selectedBars.length >= 2) return this.barChartForCode(code, selected, `bar_${selected}`);
+            if (selected === '5m' && oneMinuteBars.length >= 2) return this.barChartForCode(code, '1m', 'fallback_1m');
+            if (selectedBars.length === 1) return this.barChartForCode(code, selected, 'fallback_single_bar');
+            if (selected === '5m' && oneMinuteBars.length === 1) return this.barChartForCode(code, '1m', 'fallback_single_bar');
+            const tickFallback = this.chartFromHistory('stocks', code);
+            if (tickFallback) return tickFallback;
+            return this.chartFromQuote(stock.price, stock.change_pct);
+        },
+
+        stateCandleModel(stock) {
+            const code = this.normalizeCode(stock?.code || stock?.symbol);
+            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
+            const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
+            let bar = selectedBars[selectedBars.length - 1];
+            let intervalReady = false;
+            let label = '현재가';
+
+            if (!bar && selected === '5m' && oneMinuteBars.length > 0) {
+                bar = oneMinuteBars[oneMinuteBars.length - 1];
+                intervalReady = oneMinuteBars.length >= 2 || (!!bar._hasWs && Number(bar.count) >= 2);
+                label = intervalReady ? '5m→1m' : '현재가';
+            } else if (bar) {
+                intervalReady = selectedBars.length >= 2 || (!!bar._hasWs && Number(bar.count) >= 2);
+                label = intervalReady ? selected : '현재가';
+            }
+            if (bar) {
+                const count = Number(bar.count) || 0;
+                const open = Number(bar.open);
+                const close = Number(bar.close);
+                const high = Number(bar.high);
+                const low = Number(bar.low);
+                if (count < 2 || !Number.isFinite(open) || !Number.isFinite(close) || open <= 0 || close <= 0) {
+                    const price = Number(close || open || stock?.price || 0);
+                    return this.neutralStateCandle(price, price > 0 ? '현재가' : '수집중', bar);
+                }
+                if (!intervalReady) {
+                    return this.neutralStateCandle(close, '현재가', bar);
+                }
+                return {
+                    status: 'OK',
+                    label,
+                    open,
+                    high: Number.isFinite(high) && high > 0 ? high : Math.max(open, close),
+                    low: Number.isFinite(low) && low > 0 ? low : Math.min(open, close),
+                    close,
+                    amount: Number(bar.amount) || 0,
+                    strength: Number(bar.strength || stock?.strength || stock?.execution_strength) || 0,
+                    count,
+                };
+            }
+
+            const price = Number(stock?.price || this.liveQuotes[code]?.price || 0);
+            return this.neutralStateCandle(price, price > 0 ? '현재가' : '수집중');
+        },
+
+        neutralStateCandle(price, label = '수집중', source = {}) {
+            const p = Number(price);
+            const safe = Number.isFinite(p) && p > 0 ? p : 1;
+            return {
+                status: 'COLLECTING',
+                label,
+                open: safe,
+                high: safe,
+                low: safe,
+                close: safe,
+                amount: Number(source.amount) || 0,
+                strength: Number(source.strength) || 0,
+                count: Number(source.count) || 0,
+            };
+        },
+
+        stateCandleBodyWidth(model) {
+            const strength = Number(model?.strength) || 0;
+            const amount = Number(model?.amount) || 0;
+            if (strength >= 120 || amount >= 1000000000) return 9;
+            if (strength >= 90 || amount > 0) return 6;
+            if (strength > 0 && strength < 90) return 4;
+            return 5;
+        },
+
+        formatStatePrice(price) {
+            const p = Number(price);
+            return Number.isFinite(p) && p > 0 ? Math.round(p).toLocaleString('ko-KR') : '-';
+        },
+
+        renderMiniChartPair(stock, options = {}) {
+            const chart = this.stockChart(stock);
+            const limit = Number(options.limit) || 12;
+            const candleWidth = Number(options.candleWidth) || 54;
+            const trendWidth = Number(options.trendWidth) || 92;
+            const height = Number(options.height) || 28;
+            const title = this.chartTitle(chart, chart?.source || 'placeholder');
+            const candle = this.renderCandleStrip(chart, { width: candleWidth, height, limit });
+            const trend = this.renderTrendSparkline(chart, { width: trendWidth, height, limit, price: stock?.price, change_pct: stock?.change_pct });
+            return `\
+<div class="mini-chart-pair" title="${title}" style="display:grid;grid-template-columns:${candleWidth}px ${trendWidth}px;gap:8px;align-items:center;width:${candleWidth + trendWidth + 8}px;height:${height}px;">\
+${candle}\
+${trend}\
+</div>`;
+        },
+
+        renderCandleStrip(chart, options = {}) {
+            const W = Number(options.width) || 54;
+            const H = Number(options.height) || 28;
+            const limit = Number(options.limit) || 10;
+            const title = this.chartTitle(chart, chart?.source || 'placeholder');
+            const bars = this.chartBars(chart).slice(-limit);
+            if (bars.length === 0) return this.placeholderMiniSvg(W, H, title, 'candle');
+            if (bars.length < 3) return this.collectingCandleSvg(W, H, title, bars);
+
+            const prices = bars.flatMap(b => [Number(b.open), Number(b.high), Number(b.low), Number(b.close)])
+                .filter(v => Number.isFinite(v) && v > 0);
+            if (prices.length === 0) return this.placeholderMiniSvg(W, H, title, 'candle');
+
+            const yOf = this.miniYScale(prices, H, 2, 2);
+            const step = bars.length > 1 ? W / bars.length : W;
+            const bodyW = Math.max(2.4, Math.min(4.8, step * 0.46));
+            const nodes = bars.map((b, i) => {
+                const x = bars.length === 1 ? W / 2 : i * step + step / 2;
+                const open = Number(b.open);
+                const close = Number(b.close);
+                const high = Number(b.high);
+                const low = Number(b.low);
+                const up = close >= open;
+                const color = up ? '#D81E26' : '#1A5CDD';
+                const yOpen = yOf(open);
+                const yClose = yOf(close);
+                const yBody = Math.min(yOpen, yClose);
+                const hBody = Math.max(2, Math.abs(yOpen - yClose));
+                return `\
+<line x1="${x.toFixed(1)}" y1="${yOf(high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${yOf(low).toFixed(1)}" stroke="${color}" stroke-width="1" opacity="0.9"/>\
+<rect x="${(x - bodyW / 2).toFixed(1)}" y="${yBody.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${hBody.toFixed(1)}" rx="0.6" fill="${color}" opacity="0.72"/>`;
+            }).join('');
+            return `\
+<svg class="mini-candle-strip" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<title>${title}</title>\
+${nodes}\
+</svg>`;
+        },
+
+        collectingCandleSvg(width, height, title, bars = []) {
+            const W = Number(width) || 54;
+            const H = Number(height) || 28;
+            const midY = H / 2;
+            const markers = (bars.length ? bars : [null]).map((b, i) => {
+                const count = Math.max(1, bars.length || 1);
+                const x = count === 1 ? W / 2 : 12 + i * Math.max(10, (W - 24) / (count - 1));
+                const up = !b || Number(b.close) >= Number(b.open);
+                const color = up ? '#D81E26' : '#1A5CDD';
+                return `<rect x="${(x - 3).toFixed(1)}" y="${(midY - 1.5).toFixed(1)}" width="6" height="3" rx="1.5" fill="${color}" opacity="0.72"/>`;
+            }).join('');
+            return `\
+<svg class="mini-candle-strip" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<title>${title}</title>\
+<line x1="4" y1="${midY.toFixed(1)}" x2="${W - 4}" y2="${midY.toFixed(1)}" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2 3"/>\
+${markers}\
+</svg>`;
+        },
+
+        renderTrendSparkline(chart, options = {}) {
+            const W = Number(options.width) || 92;
+            const H = Number(options.height) || 28;
+            const limit = Number(options.limit) || 12;
+            const title = this.chartTitle(chart, chart?.source || 'placeholder');
+            let points = this.chartPoints(chart).slice(-limit);
+            if (points.length === 0) {
+                const flat = this.chartFromQuote(options.price, options.change_pct);
+                points = this.chartPoints(flat).slice(-2);
+            }
+            if (points.length === 0) return this.placeholderMiniSvg(W, H, title, 'trend');
+
+            if (points.length === 1) {
+                const p = points[0].p;
+                points = [{ t: points[0].t - 60000, p }, { t: points[0].t, p }];
+            }
+            const values = points.map(p => Number(p.p)).filter(v => Number.isFinite(v) && v > 0);
+            if (values.length === 0) return this.placeholderMiniSvg(W, H, title, 'trend');
+
+            const yOf = this.miniYScale(values, H, 4, 4, 0.004);
+            const xOf = (i) => (points.length === 1 ? W / 2 : 2 + (i / (points.length - 1)) * (W - 4));
+            const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(Number(p.p)).toFixed(1)}`).join(' ');
+            const first = Number(points[0].p);
+            const last = Number(points[points.length - 1].p);
+            const color = last >= first ? '#D81E26' : '#1A5CDD';
+            return `\
+<svg class="mini-trend-line" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<title>${title}</title>\
+<path d="${path}" fill="none" stroke="${color}" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/>\
+</svg>`;
+        },
+
+        chartBars(chart) {
+            const bars = Array.isArray(chart?.bars) ? chart.bars : [];
+            if (bars.length > 0) return bars;
+            return this.pseudoBarsFromPoints(chart?.points || []);
+        },
+
+        chartPoints(chart) {
+            if (Array.isArray(chart?.points) && chart.points.length > 0) return chart.points;
+            return (chart?.bars || []).map(b => ({ t: b.t, p: b.close }));
+        },
+
+        miniYScale(values, height, topPad = 3, bottomPad = 3, minPct = 0.004) {
+            const nums = values.map(Number).filter(v => Number.isFinite(v) && v > 0);
+            const rawMin = Math.min(...nums);
+            const rawMax = Math.max(...nums);
+            const last = nums[nums.length - 1] || rawMax || 1;
+            const minRange = Math.abs(last) * minPct;
+            const range = Math.max(rawMax - rawMin, minRange);
+            const mid = (rawMax + rawMin) / 2;
+            const lo = mid - range / 2;
+            const hi = mid + range / 2;
+            const usable = Math.max(4, height - topPad - bottomPad);
+            return (v) => topPad + Math.min(Math.max((hi - Number(v)) / (hi - lo), 0), 1) * usable;
+        },
+
+        placeholderMiniSvg(width, height, title, kind) {
+            const W = Number(width) || 54;
+            const H = Number(height) || 28;
+            const midY = (H / 2).toFixed(1);
+            const dash = kind === 'candle' ? '1 3' : '2 3';
+            return `\
+<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
+<title>${title}</title>\
+<line x1="2" y1="${midY}" x2="${W - 2}" y2="${midY}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="${dash}"/>\
+</svg>`;
+        },
+
+        pseudoBarsFromPoints(points) {
+            const clean = (points || [])
+                .map(p => ({ t: Number(p.t) || Date.now(), p: Number(p.p) }))
+                .filter(p => Number.isFinite(p.p) && p.p > 0);
+            if (clean.length === 0) return [];
+            return clean.map((p, i) => {
+                const prev = clean[Math.max(0, i - 1)]?.p || p.p;
+                const open = i === 0 ? prev : prev;
+                const close = p.p;
+                return {
+                    t: p.t,
+                    open,
+                    high: Math.max(open, close),
+                    low: Math.min(open, close),
+                    close,
+                    amount: 0,
+                    strength: 0,
+                    count: 1,
+                };
+            });
+        },
+
+        chartTitle(chart, fallback = 'placeholder') {
+            const source = chart?.source || fallback || 'placeholder';
+            const bars = Array.isArray(chart?.bars) ? chart.bars.length : 0;
+            const points = Array.isArray(chart?.points) ? chart.points.length : 0;
+            if (bars > 0) return `chart source: ${source}, bars: ${bars}`;
+            if (points > 0) return `chart source: ${source}, points: ${points}`;
+            return `chart source: ${source}`;
         },
 
         sparklineMeta(chart) {
@@ -733,6 +1145,7 @@ ${metaTextSvg}\
             const ref = Number.isFinite(baseline) && baseline > 0 ? baseline : first;
             return {
                 status: 'OK',
+                source: bucket === 'stocks' ? 'fallback_tick' : 'history',
                 baseline: ref,
                 points: chart.points,
                 point_count: chart.points.length,
@@ -747,6 +1160,7 @@ ${metaTextSvg}\
             const now = Date.now();
             return {
                 status: 'OK',
+                source: 'fallback_flat',
                 baseline,
                 points: [
                     { t: now - 60000, p: baseline },
@@ -760,10 +1174,23 @@ ${metaTextSvg}\
         stockChart(stock) {
             if (!stock) return null;
             const code = this.normalizeCode(stock.code || stock.symbol);
-            const liveChart = this.chartFromHistory('stocks', code);
-            if (liveChart) return liveChart;
-            const chart = stock.chart || stock.price_chart || stock.sparkline;
-            if (chart) return chart;
+            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
+            const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
+
+            if (selectedBars.length >= 2) {
+                return this.barChartForCode(code, selected, `bar_${selected}`);
+            }
+            if (selected === '5m' && selectedBars.length < 2 && oneMinuteBars.length > 0) {
+                return this.barChartForCode(code, '1m', 'fallback_1m');
+            }
+            if (selectedBars.length === 1) {
+                return this.barChartForCode(code, selected, 'fallback_single_bar');
+            }
+            const oneMinuteFallback = selected !== '1m' ? this.barChartForCode(code, '1m', 'fallback_1m') : null;
+            if (oneMinuteFallback) return oneMinuteFallback;
+            const tickFallback = this.chartFromHistory('stocks', code);
+            if (tickFallback) return tickFallback;
             return this.chartFromQuote(stock.price, stock.change_pct);
         },
 
@@ -784,6 +1211,119 @@ ${metaTextSvg}\
             if (!raw) return '';
             const body = raw.startsWith('A') && /^\d+$/.test(raw.slice(1)) ? raw.slice(1) : raw;
             return /^\d+$/.test(body) ? body.padStart(6, '0') : body;
+        },
+
+        loadMiniChartInterval() {
+            try {
+                const stored = localStorage.getItem('jc_mini_chart_interval');
+                this.miniChartInterval = stored === '5m' ? '5m' : '1m';
+            } catch (_) {
+                this.miniChartInterval = '1m';
+            }
+        },
+
+        setMiniChartInterval(interval) {
+            this.miniChartInterval = interval === '5m' ? '5m' : '1m';
+            try {
+                localStorage.setItem('jc_mini_chart_interval', this.miniChartInterval);
+            } catch (_) {}
+        },
+
+        updateBarSeriesFromTick(code, tick) {
+            this.updateBarsFromQuote(code, tick, 'ws');
+        },
+
+        updateBarsFromQuote(code, quote, source = 'quote') {
+            const normalized = this.normalizeCode(code);
+            const price = Number(quote?.price ?? quote?.current_price ?? quote?.last_price);
+            if (!normalized || !Number.isFinite(price) || price <= 0) return;
+
+            const rawTime = quote?.timestamp || quote?.updated_at || quote?.t;
+            const parsedTime = rawTime ? Date.parse(rawTime) : NaN;
+            const now = Number.isFinite(parsedTime) ? parsedTime : Date.now();
+            const cumulativeAmount = Number(
+                quote?.cumulative_trading_value
+                ?? quote?.volume_amount
+                ?? quote?.trading_value
+                ?? quote?.amount
+            ) || 0;
+            const previousAmount = Number(this.liveQuotes[normalized]?.cumulative_trading_value) || 0;
+            const amount = cumulativeAmount > 0 && previousAmount > 0 && cumulativeAmount >= previousAmount
+                ? cumulativeAmount - previousAmount
+                : 0;
+            const strength = Number(quote?.strength ?? quote?.execution_strength ?? quote?.trade_strength) || 0;
+            const quoteKey = [
+                source,
+                price,
+                cumulativeAmount || '',
+                strength || '',
+                quote?.change_pct ?? '',
+            ].join('|');
+            const series = this.barSeriesByCode[normalized] || (this.barSeriesByCode[normalized] = { '1m': [], '5m': [] });
+            this.updateBarBucket(series['1m'], now, price, amount, strength, 60 * 1000, source, quoteKey);
+            this.updateBarBucket(series['5m'], now, price, amount, strength, 5 * 60 * 1000, source, quoteKey);
+        },
+
+        updateBarBucket(bars, now, price, amount, strength, bucketMs, source = 'quote', quoteKey = '') {
+            const bucket = Math.floor(now / bucketMs) * bucketMs;
+            let bar = bars[bars.length - 1];
+            if (!bar || bar.t !== bucket) {
+                bar = {
+                    t: bucket,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    amount: Math.max(0, amount),
+                    strength,
+                    count: 1,
+                    source,
+                    _hasWs: source === 'ws',
+                    _lastQuoteKeys: { [source]: quoteKey },
+                };
+                bars.push(bar);
+            } else {
+                const lastKeys = bar._lastQuoteKeys || (bar._lastQuoteKeys = {});
+                const duplicateSnapshot = source !== 'ws' && quoteKey && lastKeys[source] === quoteKey;
+                if (duplicateSnapshot && Number(bar.close) === price) return;
+                bar.high = Math.max(Number(bar.high) || price, price);
+                bar.low = Math.min(Number(bar.low) || price, price);
+                bar.close = price;
+                if (!duplicateSnapshot) {
+                    bar.amount = (Number(bar.amount) || 0) + Math.max(0, amount);
+                    bar.count = (Number(bar.count) || 0) + 1;
+                }
+                bar.strength = strength || bar.strength;
+                bar.source = source || bar.source;
+                bar._hasWs = !!bar._hasWs || source === 'ws';
+                if (quoteKey) lastKeys[source] = quoteKey;
+            }
+            if (bars.length > 60) bars.splice(0, bars.length - 60);
+        },
+
+        barChartForCode(code, interval = '1m', source = '') {
+            const normalized = this.normalizeCode(code);
+            const selected = interval === '5m' ? '5m' : '1m';
+            const bars = (this.barSeriesByCode[normalized]?.[selected] || []).slice(-40);
+            if (bars.length === 0) return null;
+            const points = bars.length === 1
+                ? [
+                    { t: bars[0].t, p: bars[0].open },
+                    { t: bars[0].t + (selected === '5m' ? 5 * 60 * 1000 : 60 * 1000), p: bars[0].close },
+                ]
+                : bars.map(b => ({ t: b.t, p: b.close }));
+            const first = Number(points[0]?.p);
+            const last = Number(points[points.length - 1]?.p);
+            return {
+                status: 'OK',
+                source: source || `bar_${selected}`,
+                interval: selected,
+                bars,
+                points,
+                baseline: first,
+                point_count: points.length,
+                change_from_baseline_pct: first ? ((last - first) / first) * 100 : 0,
+            };
         },
 
         upsertLiveQuote(stock, source = 'api') {
@@ -814,6 +1354,7 @@ ${metaTextSvg}\
                 _source: source,
                 _updated_at_ms: Date.now(),
             };
+            this.updateBarsFromQuote(code, quote, source);
             this.liveQuotes[code] = quote;
             this.stocks[code] = { ...(this.stocks[code] || {}), ...quote };
             return quote;
@@ -834,7 +1375,11 @@ ${metaTextSvg}\
 
         compactLeaders(themeData) {
             return [...(themeData?.leaders || [])]
-                .map(stock => this.mergeLiveQuote(stock))
+                .map(stock => {
+                    const merged = this.mergeLiveQuote(stock);
+                    this.updateBarsFromQuote(merged.code || merged.symbol, merged, 'theme');
+                    return merged;
+                })
                 .sort((a, b) => {
                     const liveA = this.isLiveStock(a) ? 1 : 0;
                     const liveB = this.isLiveStock(b) ? 1 : 0;
@@ -1067,6 +1612,7 @@ ${metaTextSvg}\
             if (Array.isArray(this.alphaforgePicksData) && this.alphaforgePicksData.length > 0) {
                 return this.alphaforgePicksData.map(stock => {
                     const merged = this.mergeLiveQuote(stock);
+                    this.updateBarsFromQuote(merged.code || merged.symbol, merged, 'alpha');
                     return {
                         ...merged,
                         horizon_setup_label: this.alphaForgeHorizonLabel(merged),
@@ -1079,6 +1625,7 @@ ${metaTextSvg}\
                 if (!isAlphaForge) continue;
                 for (const stock of theme.leaders || []) {
                     const merged = this.mergeLiveQuote(stock);
+                    this.updateBarsFromQuote(merged.code || merged.symbol, merged, 'alpha');
                     picks.push({
                         ...merged,
                         horizon_setup_label: this.alphaForgeHorizonLabel(merged),
@@ -1795,12 +2342,10 @@ ${metaTextSvg}\
                     for (const theme of Object.values(this.themes || {})) {
                         for (const stock of theme.leaders || []) {
                             this.upsertLiveQuote(stock, 'api');
-                            this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
                         }
                     }
                     for (const stock of this.alphaforgePicksData || []) {
                         this.upsertLiveQuote(stock, 'api');
-                        this.recordChartPoint('stocks', stock.code, stock.price, stock.change_pct);
                     }
                 }
                 // Decision Engine state
@@ -1883,7 +2428,6 @@ ${metaTextSvg}\
                 this.upsertLiveQuote(quote, 'ws');
 
                 console.log(`💹 ${code}: ${msg.price} (${msg.change_pct >= 0 ? '+' : ''}${msg.change_pct.toFixed(2)}%)`);
-                this.recordChartPoint('stocks', code, msg.price, msg.change_pct);
 
                 // Update themes with new tick data
                 this.updateThemesWithTick(code);
