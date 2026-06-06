@@ -262,8 +262,43 @@ def diagnose_telegram(api_result: dict[str, Any], env_values: dict[str, str], is
         result["recent_events_count"] = len(recent)
     else:
         add_issue(issues, "WARN", "TELEGRAM_RECENT_EVENTS_MISSING", "recent_events 필드 없음", None)
-    result["send_error"] = data.get("last_error_reason") or ""
-    if result["send_error"]:
+
+    result["send_error"] = str(data.get("last_error_reason") or "")
+
+    auth_status = data.get("telegram_auth_status", "")
+    is_current = data.get("is_current_unauthorized")
+
+    if is_current is None:
+        last_error_at = data.get("last_error_at")
+        last_ok_at = data.get("last_ok_at")
+        failed_today_count = int_or_zero(data.get("failed_today_count"))
+        has_401 = "401" in result["send_error"] or "unauthorized" in result["send_error"].lower()
+
+        try:
+            err_ts = int(last_error_at) if last_error_at is not None else None
+        except (TypeError, ValueError):
+            err_ts = None
+        try:
+            ok_ts = int(last_ok_at) if last_ok_at is not None else None
+        except (TypeError, ValueError):
+            ok_ts = None
+
+        is_recovered = (
+            has_401
+            and ok_ts is not None
+            and err_ts is not None
+            and ok_ts > err_ts
+            and failed_today_count == 0
+        )
+        is_current = has_401 and not is_recovered
+        if is_recovered and auth_status == "":
+            auth_status = "HISTORICAL_UNAUTHORIZED_RECOVERED"
+
+    if is_current:
+        add_issue(issues, "WARN", "TELEGRAM_SEND_ERROR", "텔레그램 현재 인증 오류(401) 지속 중", result["send_error"])
+    elif auth_status == "HISTORICAL_UNAUTHORIZED_RECOVERED":
+        add_issue(issues, "INFO", "TELEGRAM_RECOVERED_WARNING", "과거 401 오류 후 정상 OK 기록 있음", result["send_error"])
+    elif result["send_error"] and not ("401" in result["send_error"] or "unauthorized" in result["send_error"].lower()):
         add_issue(issues, "WARN", "TELEGRAM_SEND_ERROR", "텔레그램 최근 발송 오류 존재", result["send_error"])
 
     env_dry_run = env_bool(env_values.get("KR_TELEGRAM_DRY_RUN"))

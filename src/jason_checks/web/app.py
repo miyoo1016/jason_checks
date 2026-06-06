@@ -1556,6 +1556,40 @@ def create_app() -> FastAPI:
         last_sent = next((e.get("timestamp") for e in _recent_events if e.get("result") == "sent"), None)
         last_error_event = next((e for e in _recent_events if e.get("result") == "failed"), None)
 
+        last_error_at_val = _last_error_at or (last_error_event.get("timestamp") if last_error_event else None)
+        last_ok_at_val = _last_ok_at or last_sent
+        last_error_reason_val = str(_last_error_reason or (last_error_event.get("reason") if last_error_event else ""))
+
+        has_401 = "401" in last_error_reason_val or "unauthorized" in last_error_reason_val.lower()
+
+        # Safely convert to int if possible
+        try:
+            err_ts = int(last_error_at_val) if last_error_at_val is not None else None
+        except (TypeError, ValueError):
+            err_ts = None
+        try:
+            ok_ts = int(last_ok_at_val) if last_ok_at_val is not None else None
+        except (TypeError, ValueError):
+            ok_ts = None
+
+        is_recovered = (
+            has_401
+            and ok_ts is not None
+            and err_ts is not None
+            and ok_ts > err_ts
+            and failed_today == 0
+        )
+        is_current_unauthorized = has_401 and not is_recovered
+
+        if is_current_unauthorized:
+            auth_status = "CURRENT_UNAUTHORIZED"
+        elif has_401 and is_recovered:
+            auth_status = "HISTORICAL_UNAUTHORIZED_RECOVERED"
+        elif token_present and chat_id_present:
+            auth_status = "OK"
+        else:
+            auth_status = "NOT_CONFIGURED"
+
         return {
             "enabled": cfg["enabled"],
             "dry_run": cfg["dry_run"],
@@ -1576,9 +1610,11 @@ def create_app() -> FastAPI:
             "failed_today_count": failed_today,
             "skipped_today_count": skipped_today,
             "last_sent_at": last_sent,
-            "last_ok_at": _last_ok_at or last_sent,
-            "last_error_at": _last_error_at or (last_error_event.get("timestamp") if last_error_event else None),
-            "last_error_reason": _last_error_reason or (last_error_event.get("reason") if last_error_event else None),
+            "last_ok_at": last_ok_at_val,
+            "last_error_at": last_error_at_val,
+            "last_error_reason": last_error_reason_val,
+            "telegram_auth_status": auth_status,
+            "is_current_unauthorized": is_current_unauthorized,
             "runtime_last_error_at": _last_error_at,
         }
 

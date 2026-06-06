@@ -116,7 +116,7 @@
                     </nav>
                     <div class="text-right text-sm">
                         <div class="font-bold" x-text="`${currentTime}`"></div>
-                        <div class="text-xs opacity-60" x-text="`MODE: ${mode.toUpperCase()}`"></div>
+                        <div class="text-xs opacity-60" x-text="`데이터 모드: ${mode.toUpperCase()}`"></div>
                     </div>
                     <button @click="copyDashboardText()"
                             class="copy-all-btn"
@@ -181,7 +181,7 @@
         <!-- Session Indicator Bar -->
         <div class="bg-white border-b border-gray-200 py-2 sticky top-[125px] z-10 shadow-sm">
             <div class="max-w-7xl mx-auto px-4 flex gap-4 items-center justify-center text-[11px] font-bold">
-                <span class="text-gray-500">SESSION:</span>
+                <span class="text-gray-500">시장 세션:</span>
                 <template x-if="market === 'KR'">
                     <div class="flex gap-4">
                         <span x-show="sessionType === 'pre'" class="text-purple-600">🌅 PRE-MARKET (NXT 08:00-08:50)</span>
@@ -305,7 +305,7 @@
                                 <span class="text-slate-500 border-l border-slate-200 pl-2">발송/스킵: <span class="text-[#1E7FA6]" x-text="telegramStatus.sent_today_count"></span> / <span class="text-slate-400" x-text="telegramStatus.skipped_today_count"></span></span>
                                 <span class="text-slate-500 border-l border-slate-200 pl-2">오류: <span class="text-red-500" x-text="telegramStatus.failed_today_count"></span></span>
                                 <span class="text-slate-500 border-l border-slate-200 pl-2">OK: <span class="text-slate-700" x-text="telegramStatus.last_ok_at ? new Date(telegramStatus.last_ok_at).toLocaleTimeString('ko-KR') : '-'"></span></span>
-                                <span x-show="telegramStatus.last_error_reason" class="text-red-500 border-l border-slate-200 pl-2 truncate max-w-[360px]" x-text="telegramStatus.last_error_reason"></span>
+                                <span x-show="telegramStatus.last_error_reason" class="border-l border-slate-200 pl-2 truncate max-w-[360px]" :class="telegramStatus.is_current_unauthorized === false && telegramStatus.telegram_auth_status === 'HISTORICAL_UNAUTHORIZED_RECOVERED' ? 'text-amber-600' : 'text-red-500'" x-text="telegramStatus.is_current_unauthorized === false && telegramStatus.telegram_auth_status === 'HISTORICAL_UNAUTHORIZED_RECOVERED' ? '과거 401 오류 후 정상 OK 기록 있음' : telegramStatus.last_error_reason"></span>
                             </div>
                             <button @click.prevent.stop="showTelegramMonitor = true" class="px-2.5 py-1 rounded bg-[#2AABEE]/10 text-[#1E7FA6] hover:bg-[#2AABEE]/20 transition-colors font-bold border border-[#2AABEE]/30">전송내역 보기</button>
                         </div>
@@ -948,7 +948,7 @@
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.19-.08-.05-.19-.02-.27 0-.11.03-1.84 1.18-5.22 3.47-.49.34-.94.51-1.34.5-.44-.01-1.28-.24-1.9-.45-.77-.25-1.38-.38-1.33-.8.03-.22.34-.44.93-.68 3.65-1.59 6.09-2.65 7.32-3.15 3.48-1.42 4.2-1.68 4.67-1.69.1 0 .34.02.49.14.12.1.15.24.16.35-.01.07-.02.16-.03.31z"/></svg>
                             <span>Telegram 전송 내역</span>
                             <div class="ml-2 flex items-center gap-1.5 text-[10px]">
-                                <span class="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600" x-text="'MODE: ' + telegramStatus.mode"></span>
+                                <span class="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600" x-text="'데이터 모드: ' + telegramStatus.mode"></span>
                                 <span class="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600" x-text="'MIN: ' + telegramStatus.min_level"></span>
                             </div>
                         </div>

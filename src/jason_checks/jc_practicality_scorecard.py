@@ -1023,7 +1023,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 생성 시각: {report['generated_at']}",
         f"- 데이터 모드: **{score_data_mode}**",
         f"- {data_mode_note}",
-        f"- 현재 점수 유형: **{context_text}**",
+        f"- 현재 평가 맥락: **{context_text}**",
         f"- {context_note}",
         f"- 현재 JC 실전성 점수: **{report['overall_jc_practicality_score']} / 100**",
         f"- raw score: {report['raw_overall_score']} / 100",
