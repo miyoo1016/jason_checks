@@ -1,11 +1,14 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
+import jason_checks.jc_practicality_scorecard as scorecard
 from jason_checks.jc_practicality_scorecard import calculate_scorecard, render_markdown, write_reports
 
 
-def _base_context():
+def _base_context(session="MARKET_CLOSED", mode="prod"):
     return {
         "themes": {
+            "mode": mode,
             "alphaforge_candidates_loaded": 5,
             "alphaforge_candidates_generated_at": "2026-06-06T09:00:00+09:00",
             "alphaforge_picks": [
@@ -30,8 +33,8 @@ def _base_context():
             "supply_data_reason": "KIS 선택수급: 전일수급 5/5 · 전체 섹터 수급: 미조회",
         },
         "decision_summary": {
-            "session": "MARKET_CLOSED",
-            "market_gate_level": "CRASH",
+            "session": session,
+            "market_gate_level": "CRASH" if session == "MARKET_CLOSED" else "NORMAL",
             "market_gate_reason": "지수 급락",
             "decision_counts": {
                 "BUY_NOW": 0,
@@ -80,10 +83,24 @@ def _base_context():
     }
 
 
-def test_strength_zero_caps_overall_at_75():
+def test_market_closed_strength_zero_is_not_evaluated_or_capped():
     ctx = _base_context()
     ctx["themes"]["quote_polling"]["strength_success"] = 0
     report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["score_context"] == "CLOSED_REVIEW"
+    assert report["realtime_strength_status"] == "NOT_EVALUATED_SESSION_CLOSED"
+    assert report["realtime_strength_evaluable"] is False
+    assert report["scores"]["realtime_strength_score"]["score"] is None
+    assert not any("체결강도 커버리지 0%" in reason for reason in report["cap_reasons"])
+
+
+def test_live_strength_zero_caps_overall_at_75():
+    ctx = _base_context(session="LIVE", mode="LIVE")
+    ctx["themes"]["quote_polling"]["strength_success"] = 0
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["score_context"] == "LIVE_TRADING_REVIEW"
+    assert report["realtime_strength_status"] == "FAILED_LIVE_STRENGTH_COLLECTION"
+    assert report["realtime_strength_evaluable"] is True
     assert report["overall_jc_practicality_score"] <= 75
     assert any("체결강도 커버리지 0%" in reason for reason in report["cap_reasons"])
 
@@ -102,6 +119,22 @@ def test_guard_stale_lowers_ops_score():
     assert any("JC Guard STALE" in note for note in report["scores"]["ops_reliability_score"]["notes"])
 
 
+def test_session_label_mismatch_is_reported():
+    ctx = _base_context(session="MARKET_CLOSED", mode="LIVE")
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert any(a["code"] == "SESSION_LABEL_MISMATCH" for a in report["anomalies"])
+
+
+def test_guard_age_anomaly_and_parse_failure_are_safe():
+    ctx = _base_context()
+    ctx["guard_status"] = {"overall_status": "STALE", "is_stale": True, "timestamp": "2026-05-01T00:00:00+09:00"}
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["guard_timestamp_diagnostics"]["guard_age_anomaly"] is True
+    ctx["guard_status"] = {"overall_status": "STALE", "is_stale": True, "timestamp": "not-a-date"}
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["guard_timestamp_diagnostics"]["guard_timestamp_parse_status"] == "PARSE_FAILED"
+
+
 def test_forward_small_sample_confidence_not_high():
     report = calculate_scorecard(_base_context(), now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
     assert report["confidence"] in ("LOW", "MEDIUM_LOW")
@@ -117,15 +150,33 @@ def test_telegram_401_penalizes_ops():
     }
     report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
     assert report["scores"]["ops_reliability_score"]["score"] <= 60
+    rendered = render_markdown(report)
+    assert "http_401_unauthorized" in rendered
+    assert "TOKEN" not in rendered.upper()
+    assert "CHAT_ID" not in rendered.upper()
 
 
-def test_alphaforge_validation_missing_penalizes_link_score():
+def test_alphaforge_validation_missing_penalizes_link_score(monkeypatch):
+    monkeypatch.setattr(scorecard, "ALPHAFORGE_VALIDATION_PATHS", [])
     ctx = _base_context()
     ctx["alphaforge_validation"] = {"available": False, "reason": "AlphaForge 검증 리포트 없음"}
     report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
     link = report["scores"]["alphaforge_validation_link_score"]
     assert link["status"] == "DATA_NA"
     assert link["score"] < 70
+
+
+def test_alphaforge_validation_path_mismatch(monkeypatch, tmp_path):
+    found = tmp_path / "alphaforge_performance_scorecard.json"
+    found.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(scorecard, "ALPHAFORGE_VALIDATION_PATHS", [found, Path("/missing/nope.json")])
+    ctx = _base_context()
+    ctx["alphaforge_validation"] = {"available": False, "reason": "AlphaForge 검증 리포트 없음"}
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    diag = report["alphaforge_validation_diagnostics"]
+    assert report["scores"]["alphaforge_validation_link_score"]["status"] == "PATH_MISMATCH"
+    assert diag["alphaforge_validation_status"] == "PATH_MISMATCH"
+    assert str(found) in diag["alphaforge_validation_path_found"]
 
 
 def test_reports_render_without_dashboard_imports(tmp_path, monkeypatch):

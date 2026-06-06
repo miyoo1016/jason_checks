@@ -35,6 +35,17 @@ WEIGHTS = {
     "alphaforge_validation_link_score": 2,
 }
 
+CLOSED_SESSIONS = {"MARKET_CLOSED", "CLOSED", "WEEKEND", "HOLIDAY", "PRE_MARKET", "AFTER_MARKET", "AFTER"}
+LIVE_SESSIONS = {"LIVE", "REGULAR", "REGULAR_SESSION"}
+ALPHAFORGE_VALIDATION_PATHS = [
+    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.json"),
+    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.md"),
+    ROOT / "reports" / "alphaforge_performance_scorecard.json",
+    ROOT / "data" / "exports" / "alphaforge_validation.json",
+    ROOT / "data" / "reports" / "alphaforge_performance_scorecard.json",
+    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json"),
+]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -100,6 +111,33 @@ def _age_hours(value: Any, now: datetime) -> float | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=now.tzinfo)
     return max(0.0, (now - dt.astimezone(now.tzinfo)).total_seconds() / 3600)
+
+
+def _session_text(context_or_decision: dict[str, Any]) -> str:
+    if "decision_summary" in context_or_decision:
+        decision = context_or_decision.get("decision_summary") or {}
+        themes = context_or_decision.get("themes") or {}
+    else:
+        decision = context_or_decision
+        themes = {}
+    return str(decision.get("session") or themes.get("session_status") or "").strip().upper()
+
+
+def _mode_text(context: dict[str, Any]) -> str:
+    return str((context.get("themes") or {}).get("mode") or "").strip().upper()
+
+
+def _score_context(context: dict[str, Any]) -> str:
+    session = _session_text(context)
+    if session in CLOSED_SESSIONS:
+        return "CLOSED_REVIEW"
+    if session in LIVE_SESSIONS:
+        return "LIVE_TRADING_REVIEW"
+    return "LIVE_TRADING_REVIEW" if _mode_text(context) == "LIVE" else "CLOSED_REVIEW"
+
+
+def _is_closed_review(context: dict[str, Any]) -> bool:
+    return _score_context(context) == "CLOSED_REVIEW"
 
 
 @dataclass
@@ -180,7 +218,7 @@ def _score_quote_coverage(themes: dict[str, Any]) -> Score:
     })
 
 
-def _score_realtime_strength(themes: dict[str, Any], decision: dict[str, Any]) -> Score:
+def _score_realtime_strength(themes: dict[str, Any], decision: dict[str, Any], context: dict[str, Any]) -> Score:
     q = themes.get("quote_polling") or {}
     success = _to_int(q.get("strength_success") or q.get("theme_row_strength_count"))
     total = _to_int(q.get("strength_total") or q.get("theme_row_total") or q.get("total"))
@@ -189,17 +227,42 @@ def _score_realtime_strength(themes: dict[str, Any], decision: dict[str, Any]) -
         total = len(results)
         success = sum(1 for r in results if r.get("has_strength") or _to_float(r.get("strength")) > 0)
     ratio = _score_from_ratio(success, total)
+    score_context = _score_context(context)
+    closed_review = score_context == "CLOSED_REVIEW"
     score = ratio
     notes = []
+    status = "OK" if total else "DATA_INSUFFICIENT"
+    reason = ""
+    evaluable = True
+    basis = "LIVE_STRENGTH_COVERAGE"
     if total and success == 0:
-        score = 5
-        notes.append("체결강도 0%: 실시간 매수판단 신뢰도 cap 필요")
+        if closed_review:
+            score = 0
+            status = "NOT_EVALUATED_SESSION_CLOSED"
+            reason = "휴장/폐장 상태라 체결강도 기반 실시간 승격 판단은 평가할 수 없음"
+            evaluable = False
+            basis = "EXCLUDED_SESSION_CLOSED"
+            notes.append(reason)
+        else:
+            score = 5
+            status = "FAILED_LIVE_STRENGTH_COLLECTION"
+            reason = "장중 LIVE인데 체결강도 수집 0%"
+            notes.append(reason)
     elif ratio < 50:
         notes.append(f"체결강도 커버리지 낮음: {success}/{total}")
-    return Score(score, "OK" if total else "DATA_INSUFFICIENT", notes, {
+        reason = f"체결강도 커버리지 낮음: {success}/{total}"
+    else:
+        reason = f"체결강도 커버리지 {ratio:.1f}%"
+    return Score(score, status, notes, {
         "success": success,
         "total": total,
         "coverage_pct": round(ratio, 2),
+        "realtime_strength_status": status,
+        "realtime_strength_reason": reason,
+        "realtime_strength_evaluable": evaluable,
+        "realtime_strength_coverage_pct": round(ratio, 2),
+        "realtime_strength_score_basis": basis,
+        "score_context": score_context,
     })
 
 
@@ -362,12 +425,17 @@ def _score_ops(guard: dict[str, Any], telegram: dict[str, Any]) -> Score:
     if not last_error:
         last_failed = next((e for e in recent if e.get("result") in ("failed", "FAIL")), {})
         last_error = str(last_failed.get("reason") or "")
+    telegram_status = "TELEGRAM_DATA_NA"
     if "401" in last_error or "unauthorized" in last_error.lower():
         score = min(score, 60)
-        notes.append(f"Telegram 인증 오류: {last_error}")
+        telegram_status = "TELEGRAM_UNAUTHORIZED"
+        notes.append("Telegram 인증 오류: 토큰 또는 권한 확인 필요")
     elif last_error:
+        telegram_status = "TELEGRAM_ERROR"
         score -= 12
-        notes.append(f"Telegram 최근 오류: {last_error}")
+        notes.append("Telegram 최근 오류")
+    elif telegram:
+        telegram_status = "TELEGRAM_OK"
     if telegram and not telegram.get("configured", telegram.get("credentials_present", False)):
         score -= 25
         notes.append("Telegram credentials 미설정")
@@ -376,36 +444,93 @@ def _score_ops(guard: dict[str, Any], telegram: dict[str, Any]) -> Score:
         "guard_age_sec": age_sec,
         "telegram_enabled": telegram.get("enabled"),
         "telegram_dry_run": telegram.get("dry_run"),
-        "telegram_last_error_reason": last_error,
+        "telegram_last_error_reason": "send_error: http_401_unauthorized" if telegram_status == "TELEGRAM_UNAUTHORIZED" else ("telegram_error" if last_error else ""),
+        "telegram_status": telegram_status,
     })
 
 
 def _score_alphaforge_validation(validation: dict[str, Any]) -> Score:
-    possible_paths = [
-        Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.json"),
-        Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.md"),
-        Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json"),
-    ]
-    existing = [str(p) for p in possible_paths if p.exists()]
+    checked = [str(p) for p in ALPHAFORGE_VALIDATION_PATHS]
+    existing = [str(p) for p in ALPHAFORGE_VALIDATION_PATHS if p.exists()]
     if validation.get("available"):
-        return Score(90, "OK", [], {"jc_validation": validation, "existing_jo_reports": existing})
+        return Score(90, "OK", [], {
+            "jc_validation": validation,
+            "existing_jo_reports": existing,
+            "alphaforge_validation_status": "FOUND",
+            "alphaforge_validation_path_checked": checked,
+            "alphaforge_validation_path_found": existing,
+            "alphaforge_validation_reason": "JC API linked",
+        })
     notes = [validation.get("reason") or "AlphaForge Validation 리포트 없음"]
     score = 45 if not existing else 20
+    status = "DATA_NA" if not existing else "PATH_MISMATCH"
+    reason = "candidate files not found" if not existing else "file exists but JC validation API is not linked to it"
     if existing:
         notes.append("JO 리포트는 존재하지만 JC 연동 경로 mismatch 가능")
-    return Score(score, "DATA_NA", notes, {"jc_validation": validation, "existing_jo_reports": existing})
+    return Score(score, status, notes, {
+        "jc_validation": validation,
+        "existing_jo_reports": existing,
+        "alphaforge_validation_status": status,
+        "alphaforge_validation_path_checked": checked,
+        "alphaforge_validation_path_found": existing,
+        "alphaforge_validation_reason": reason,
+    })
 
 
-def _find_anomalies(context: dict[str, Any], scores: dict[str, Score]) -> list[dict[str, Any]]:
+def _diagnose_guard_timestamp(guard: dict[str, Any], now: datetime) -> dict[str, Any]:
+    raw = guard.get("timestamp")
+    parsed = _parse_dt(raw)
+    age_minutes = None
+    parse_status = "OK"
+    reason = ""
+    anomaly = False
+    if raw and not parsed:
+        parse_status = "PARSE_FAILED"
+        reason = "Guard timestamp ISO parse failed"
+        anomaly = True
+    elif parsed:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+            reason = "timestamp timezone missing; local timezone assumed"
+        age_minutes = max(0.0, (now - parsed.astimezone(now.tzinfo)).total_seconds() / 60)
+        if age_minutes > 7 * 24 * 60:
+            anomaly = True
+            reason = reason or "Guard report older than 7 days; stale age may look abnormal"
+        elif age_minutes > 24 * 60:
+            reason = reason or "Guard report older than 24 hours"
+    else:
+        parse_status = "MISSING"
+        reason = "Guard timestamp missing"
+    return {
+        "guard_stale": bool(guard.get("is_stale") or guard.get("overall_status") == "STALE"),
+        "guard_age_anomaly": anomaly,
+        "guard_timestamp_parse_status": parse_status,
+        "guard_timestamp_raw": raw,
+        "guard_age_minutes": round(age_minutes, 1) if age_minutes is not None else None,
+        "guard_age_reason": reason,
+    }
+
+
+def _find_anomalies(context: dict[str, Any], scores: dict[str, Score], guard_diag: dict[str, Any]) -> list[dict[str, Any]]:
     anomalies: list[dict[str, Any]] = []
     decision = context.get("decision_summary") or {}
     themes = context.get("themes") or {}
     q = themes.get("quote_polling") or {}
+    strength = scores["realtime_strength_score"].details
     if _to_int(q.get("strength_success") or q.get("theme_row_strength_count")) == 0 and _to_int(q.get("strength_total") or q.get("theme_row_total")) > 0:
-        anomalies.append({"code": "STRENGTH_ZERO_COVERAGE", "severity": "WARN", "message": "체결강도 0/전체 상태"})
+        if strength.get("realtime_strength_evaluable"):
+            anomalies.append({"code": "STRENGTH_ZERO_COVERAGE", "severity": "WARN", "message": "장중 LIVE인데 체결강도 0/전체 상태"})
+        else:
+            anomalies.append({"code": "STRENGTH_NOT_EVALUATED_SESSION_CLOSED", "severity": "INFO", "message": strength.get("realtime_strength_reason")})
     guard = context.get("guard_status") or {}
     if guard.get("is_stale"):
         anomalies.append({"code": "GUARD_STALE", "severity": "WARN", "message": guard.get("summary", "Guard STALE")})
+    if guard_diag.get("guard_age_anomaly") or guard_diag.get("guard_timestamp_parse_status") != "OK":
+        anomalies.append({
+            "code": "GUARD_AGE_ANOMALY",
+            "severity": "WARN",
+            "message": guard_diag.get("guard_age_reason") or "Guard timestamp/age 진단 필요",
+        })
     telegram_notes = scores["ops_reliability_score"].notes
     if any("Telegram" in n for n in telegram_notes):
         anomalies.append({"code": "TELEGRAM_SEND_ERROR", "severity": "WARN", "message": "; ".join(telegram_notes)})
@@ -422,9 +547,9 @@ def _apply_caps(raw_score: float, context: dict[str, Any], scores: dict[str, Sco
     caps: list[tuple[int, str]] = []
     strength = scores["realtime_strength_score"].details
     strength_cov = _to_float(strength.get("coverage_pct"))
-    if strength_cov == 0 and _to_int(strength.get("total")) > 0:
+    if strength.get("realtime_strength_evaluable") and strength_cov == 0 and _to_int(strength.get("total")) > 0:
         caps.append((75, "체결강도 커버리지 0%"))
-    elif strength_cov < 50:
+    elif strength.get("realtime_strength_evaluable") and strength_cov < 50:
         caps.append((80, "체결강도 커버리지 < 50%"))
     guard = context.get("guard_status") or {}
     if guard.get("is_stale") or guard.get("overall_status") == "STALE":
@@ -456,10 +581,11 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
     themes = context.get("themes") or {}
     decision = context.get("decision_summary") or {}
     forward = context.get("forward_test_summary") or decision.get("forward_test_summary") or {}
+    score_context = _score_context(context)
     scores = {
         "jo_handoff_score": _score_jo_handoff(themes, now),
         "quote_coverage_score": _score_quote_coverage(themes),
-        "realtime_strength_score": _score_realtime_strength(themes, decision),
+        "realtime_strength_score": _score_realtime_strength(themes, decision, context),
         "supply_quality_score": _score_supply(themes, decision),
         "market_gate_score": _score_market_gate(decision),
         "decision_consistency_score": _score_decision_consistency(decision),
@@ -468,22 +594,30 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
         "ops_reliability_score": _score_ops(context.get("guard_status") or {}, context.get("telegram_status") or {}),
         "alphaforge_validation_link_score": _score_alphaforge_validation(context.get("alphaforge_validation") or {}),
     }
-    raw = sum(scores[key].value * weight for key, weight in WEIGHTS.items()) / sum(WEIGHTS.values())
+    active_weights = dict(WEIGHTS)
+    if not scores["realtime_strength_score"].details.get("realtime_strength_evaluable", True):
+        active_weights.pop("realtime_strength_score", None)
+    raw = sum(scores[key].value * weight for key, weight in active_weights.items()) / sum(active_weights.values())
     capped, cap_reasons = _apply_caps(raw, context, scores)
     confidence = "MEDIUM"
     if capped < 70 or len(cap_reasons) >= 3:
         confidence = "LOW"
     elif capped < 80 or cap_reasons:
         confidence = "MEDIUM_LOW"
-    anomalies = _find_anomalies(context, scores)
+    if score_context == "CLOSED_REVIEW" and confidence == "MEDIUM":
+        confidence = "MEDIUM_LOW"
+    guard_diag = _diagnose_guard_timestamp(context.get("guard_status") or {}, now)
+    anomalies = _find_anomalies(context, scores, guard_diag)
+    realtime_details = scores["realtime_strength_score"].details
     return {
         "generated_at": _now_iso(),
+        "score_context": score_context,
         "overall_jc_practicality_score": round(capped, 1),
         "raw_overall_score": round(raw, 1),
         "confidence": confidence,
         "scores": {
             key: {
-                "score": round(score.value, 1),
+                "score": None if key == "realtime_strength_score" and not score.details.get("realtime_strength_evaluable", True) else round(score.value, 1),
                 "status": score.status,
                 "notes": score.notes,
                 "details": score.details,
@@ -491,8 +625,20 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
             for key, score in scores.items()
         },
         "weights": WEIGHTS,
+        "active_weights": active_weights,
         "cap_reasons": cap_reasons,
         "anomalies": anomalies,
+        "guard_timestamp_diagnostics": guard_diag,
+        "alphaforge_validation_diagnostics": scores["alphaforge_validation_link_score"].details,
+        "telegram_diagnostics": {
+            "telegram_status": scores["ops_reliability_score"].details.get("telegram_status"),
+            "last_error_status": scores["ops_reliability_score"].details.get("telegram_last_error_reason"),
+        },
+        "realtime_strength_status": realtime_details.get("realtime_strength_status"),
+        "realtime_strength_reason": realtime_details.get("realtime_strength_reason"),
+        "realtime_strength_evaluable": realtime_details.get("realtime_strength_evaluable"),
+        "realtime_strength_coverage_pct": realtime_details.get("realtime_strength_coverage_pct"),
+        "realtime_strength_score_basis": realtime_details.get("realtime_strength_score_basis"),
         "source_status": context.get("source_status", {}),
         "summary": {
             "decision_counts": decision.get("decision_counts", {}),
@@ -540,11 +686,24 @@ def collect_context(fetch_live: bool = True) -> dict[str, Any]:
 
 def render_markdown(report: dict[str, Any]) -> str:
     scores = report["scores"]
+    strength_score = scores["realtime_strength_score"]["score"]
+    strength_score_text = "N/A" if strength_score is None else str(strength_score)
+    context_text = report.get("score_context") or "UNKNOWN"
+    context_note = (
+        "현재 점수는 폐장 후 점검 점수이며, 장중 실시간 매수판단 성능은 아직 평가 보류입니다."
+        if context_text == "CLOSED_REVIEW"
+        else "현재 점수는 장중 실시간 매수판단 점수입니다."
+    )
+    guard_diag = report.get("guard_timestamp_diagnostics") or {}
+    av_diag = report.get("alphaforge_validation_diagnostics") or {}
+    tg_diag = report.get("telegram_diagnostics") or {}
     lines = [
         "# JC Practicality & Accuracy Scorecard v1",
         "",
         "## 요약",
         f"- 생성 시각: {report['generated_at']}",
+        f"- 현재 점수 유형: **{context_text}**",
+        f"- {context_note}",
         f"- 현재 JC 실전성 점수: **{report['overall_jc_practicality_score']} / 100**",
         f"- raw score: {report['raw_overall_score']} / 100",
         f"- confidence: **{report['confidence']}**",
@@ -553,12 +712,22 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## 현재 JC 실전성 점수",
         f"- {report['overall_jc_practicality_score']}점: 결측/운영 리스크 cap 적용 후 점수입니다.",
         "",
+        "## Closed Review Score",
+        f"- score_context: {context_text}",
+        f"- 폐장/휴장 점검 문구: {context_note}",
+        "",
+        "## Live Trading Score 평가 가능 여부",
+        f"- realtime_strength_evaluable: {report.get('realtime_strength_evaluable')}",
+        f"- reason: {report.get('realtime_strength_reason')}",
+        "",
         "## 차단기 점수",
         f"- market_gate_score: {scores['market_gate_score']['score']} ({'; '.join(scores['market_gate_score']['notes']) or '특이사항 없음'})",
         f"- decision_consistency_score: {scores['decision_consistency_score']['score']} ({'; '.join(scores['decision_consistency_score']['notes']) or '특이사항 없음'})",
         "",
         "## 실시간 매수판단 점수",
-        f"- realtime_strength_score: {scores['realtime_strength_score']['score']} ({'; '.join(scores['realtime_strength_score']['notes']) or '특이사항 없음'})",
+        f"- realtime_strength_score: {strength_score_text} ({'; '.join(scores['realtime_strength_score']['notes']) or '특이사항 없음'})",
+        f"- realtime_strength_status: {report.get('realtime_strength_status')}",
+        f"- realtime_strength_score_basis: {report.get('realtime_strength_score_basis')}",
         "",
         "## 데이터 커버리지",
         f"- quote_coverage_score: {scores['quote_coverage_score']['score']}",
@@ -573,7 +742,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- details: `{json.dumps(scores['market_gate_score']['details'], ensure_ascii=False)}`",
         "",
         "## 체결강도/실시간성 품질",
-        f"- {scores['realtime_strength_score']['score']}점",
+        f"- {strength_score_text}",
         f"- details: `{json.dumps(scores['realtime_strength_score']['details'], ensure_ascii=False)}`",
         "",
         "## 수급 데이터 품질",
@@ -588,14 +757,35 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- ops_reliability_score: {scores['ops_reliability_score']['score']}",
         f"- notes: {', '.join(scores['ops_reliability_score']['notes']) or '-'}",
         "",
+        "## Guard timestamp 진단",
+        f"- guard_timestamp_parse_status: {guard_diag.get('guard_timestamp_parse_status')}",
+        f"- guard_timestamp_raw: {guard_diag.get('guard_timestamp_raw')}",
+        f"- guard_age_minutes: {guard_diag.get('guard_age_minutes')}",
+        f"- guard_age_anomaly: {guard_diag.get('guard_age_anomaly')}",
+        f"- guard_age_reason: {guard_diag.get('guard_age_reason')}",
+        "",
+        "## Telegram 상태 진단",
+        f"- telegram_status: {tg_diag.get('telegram_status')}",
+        f"- last_error_status: {tg_diag.get('last_error_status') or '-'}",
+        "- 민감 환경값은 리포트에 포함하지 않습니다.",
+        "",
         "## AlphaForge Validation 연동 상태",
         f"- alphaforge_validation_link_score: {scores['alphaforge_validation_link_score']['score']}",
         f"- notes: {', '.join(scores['alphaforge_validation_link_score']['notes']) or '-'}",
+        "",
+        "## AlphaForge Validation 경로 진단",
+        f"- alphaforge_validation_status: {av_diag.get('alphaforge_validation_status')}",
+        f"- alphaforge_validation_path_found: `{json.dumps(av_diag.get('alphaforge_validation_path_found', []), ensure_ascii=False)}`",
+        f"- alphaforge_validation_reason: {av_diag.get('alphaforge_validation_reason')}",
         "",
         "## 90점 도달 제한 사유",
     ]
     lines.extend([f"- {reason}" for reason in report["cap_reasons"]] or ["- 제한 사유 없음"])
     lines.extend([
+        "",
+        "## session-aware 점수 cap 적용 여부",
+        f"- 체결강도 cap 적용 여부: {'적용' if any('체결강도' in r for r in report['cap_reasons']) else '미적용'}",
+        f"- score_context: {context_text}",
         "",
         "## 이상치/버그 진단",
     ])
@@ -635,8 +825,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     report = build_scorecard(fetch_live=not args.no_live, write=not args.no_write)
     print(json.dumps({
+        "score_context": report["score_context"],
         "overall_jc_practicality_score": report["overall_jc_practicality_score"],
         "confidence": report["confidence"],
+        "realtime_strength_status": report.get("realtime_strength_status"),
+        "realtime_strength_evaluable": report.get("realtime_strength_evaluable"),
         "cap_reasons": report["cap_reasons"],
         "report_paths": report.get("report_paths", {}),
     }, ensure_ascii=False, indent=2))
