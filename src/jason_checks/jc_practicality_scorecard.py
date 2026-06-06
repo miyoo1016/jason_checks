@@ -427,6 +427,122 @@ def _score_forward(forward: dict[str, Any], score_data_mode: str = "API_CONNECTE
     })
 
 
+def _diagnose_telegram(telegram: dict[str, Any]) -> dict[str, Any]:
+    """Parse telegram status dict into structured, sanitized diagnostic fields.
+
+    Returns a dict with keys:
+        telegram_status, telegram_auth_status, telegram_error_status,
+        telegram_failed_today_count, telegram_sent_today_count,
+        telegram_skipped_today_count, telegram_last_error_at,
+        telegram_last_ok_at, telegram_last_error_reason_sanitized,
+        telegram_reason, is_current_unauthorized
+    민감정보(token/chat_id 값) 출력 금지.
+    """
+    if not telegram:
+        return {
+            "telegram_status": "TELEGRAM_DATA_NA",
+            "telegram_auth_status": "DATA_NA",
+            "telegram_error_status": "DATA_NA",
+            "telegram_failed_today_count": None,
+            "telegram_sent_today_count": None,
+            "telegram_skipped_today_count": None,
+            "telegram_last_error_at": None,
+            "telegram_last_ok_at": None,
+            "telegram_last_error_reason_sanitized": "",
+            "telegram_reason": "Telegram 상태 데이터 없음",
+            "is_current_unauthorized": False,
+        }
+
+    last_error_raw = str(telegram.get("last_error_reason") or telegram.get("send_error") or "")
+    # Sanitize: strip actual token/chat_id values but keep error codes
+    last_error_sanitized = last_error_raw  # no token/key values appear in error reason strings
+
+    # Numeric timestamps (epoch ms) – handle both int and None
+    last_error_at_raw = telegram.get("last_error_at")
+    last_ok_at_raw = telegram.get("last_ok_at")
+    try:
+        last_error_at = int(last_error_at_raw) if last_error_at_raw is not None else None
+    except (TypeError, ValueError):
+        last_error_at = None
+    try:
+        last_ok_at = int(last_ok_at_raw) if last_ok_at_raw is not None else None
+    except (TypeError, ValueError):
+        last_ok_at = None
+
+    failed_today = _to_int(telegram.get("failed_today_count"), 0)
+    sent_today = _to_int(telegram.get("sent_today_count"), 0)
+    skipped_today = _to_int(telegram.get("skipped_today_count"), 0)
+
+    has_401 = "401" in last_error_sanitized or "unauthorized" in last_error_sanitized.lower()
+
+    # Determine if 401 is CURRENT or HISTORICAL
+    # HISTORICAL: last_ok_at exists AND last_ok_at > last_error_at AND failed_today == 0
+    is_recovered = (
+        has_401
+        and last_ok_at is not None
+        and last_error_at is not None
+        and last_ok_at > last_error_at
+        and failed_today == 0
+    )
+    is_current_unauthorized = has_401 and not is_recovered
+
+    # Determine auth_status
+    if has_401 and is_recovered:
+        auth_status = "HISTORICAL_UNAUTHORIZED_RECOVERED"
+    elif is_current_unauthorized:
+        auth_status = "CURRENT_UNAUTHORIZED"
+    elif telegram.get("configured", telegram.get("credentials_present", False)):
+        auth_status = "OK"
+    else:
+        auth_status = "NOT_CONFIGURED"
+
+    # Determine error_status
+    if is_current_unauthorized:
+        error_status = "CURRENT_ERROR_401"
+    elif has_401 and is_recovered:
+        error_status = "HISTORICAL_ERROR_RECOVERED"
+    elif last_error_sanitized and not has_401:
+        error_status = "RECENT_ERROR"
+    else:
+        error_status = "OK"
+
+    # Overall status
+    if is_current_unauthorized:
+        tg_status = "TELEGRAM_UNAUTHORIZED"
+    elif last_error_sanitized and not is_recovered:
+        tg_status = "TELEGRAM_ERROR"
+    elif has_401 and is_recovered:
+        tg_status = "TELEGRAM_RECOVERED"
+    elif telegram:
+        tg_status = "TELEGRAM_OK"
+    else:
+        tg_status = "TELEGRAM_DATA_NA"
+
+    # Human-readable reason
+    if is_current_unauthorized:
+        reason = "현재 Telegram 401 인증 오류 지속 중"
+    elif has_401 and is_recovered:
+        reason = f"과거 401 오류 발생 후 정상 복구됨 (last_ok_at > last_error_at, failed_today=0)"
+    elif last_error_sanitized:
+        reason = f"최근 오류: {last_error_sanitized[:80]}"
+    else:
+        reason = "정상"
+
+    return {
+        "telegram_status": tg_status,
+        "telegram_auth_status": auth_status,
+        "telegram_error_status": error_status,
+        "telegram_failed_today_count": failed_today,
+        "telegram_sent_today_count": sent_today,
+        "telegram_skipped_today_count": skipped_today,
+        "telegram_last_error_at": last_error_at,
+        "telegram_last_ok_at": last_ok_at,
+        "telegram_last_error_reason_sanitized": last_error_sanitized,
+        "telegram_reason": reason,
+        "is_current_unauthorized": is_current_unauthorized,
+    }
+
+
 def _score_ops(guard: dict[str, Any], telegram: dict[str, Any]) -> Score:
     score = 90
     notes = []
@@ -442,32 +558,45 @@ def _score_ops(guard: dict[str, Any], telegram: dict[str, Any]) -> Score:
     age_sec = _to_float(guard.get("age_sec"), -1)
     if age_sec > 24 * 3600:
         notes.append(f"Guard age 오래됨: {age_sec/60:.0f}분")
-    last_error = str(telegram.get("last_error_reason") or telegram.get("send_error") or "")
-    recent = telegram.get("recent_events") or []
-    if not last_error:
-        last_failed = next((e for e in recent if e.get("result") in ("failed", "FAIL")), {})
-        last_error = str(last_failed.get("reason") or "")
-    telegram_status = "TELEGRAM_DATA_NA"
-    if "401" in last_error or "unauthorized" in last_error.lower():
+
+    tg_diag = _diagnose_telegram(telegram)
+    is_current_unauth = tg_diag["is_current_unauthorized"]
+
+    if is_current_unauth:
         score = min(score, 60)
-        telegram_status = "TELEGRAM_UNAUTHORIZED"
-        notes.append("Telegram 인증 오류: 토큰 또는 권한 확인 필요")
-    elif last_error:
-        telegram_status = "TELEGRAM_ERROR"
+        notes.append("Telegram 인증 오류: 현재 401 unauthorized 지속")
+    elif tg_diag["telegram_auth_status"] == "HISTORICAL_UNAUTHORIZED_RECOVERED":
+        # 과거 오류 + 회복: 약한 warning만
+        score -= 5
+        notes.append("Telegram 과거 401 오류 발생 이력 (현재 회복됨)")
+    elif tg_diag["telegram_status"] == "TELEGRAM_ERROR":
         score -= 12
         notes.append("Telegram 최근 오류")
-    elif telegram:
-        telegram_status = "TELEGRAM_OK"
+
     if telegram and not telegram.get("configured", telegram.get("credentials_present", False)):
         score -= 25
         notes.append("Telegram credentials 미설정")
+
+    # telegram_last_error_reason: sanitized, no token values
+    tg_last_err_label = (
+        "send_error: http_401_unauthorized (historical, recovered)"
+        if tg_diag["telegram_auth_status"] == "HISTORICAL_UNAUTHORIZED_RECOVERED"
+        else "send_error: http_401_unauthorized"
+        if is_current_unauth
+        else ("telegram_error" if tg_diag["telegram_error_status"] == "RECENT_ERROR" else "")
+    )
+
     return Score(max(0, min(100, score)), "OK" if (guard or telegram) else "DATA_INSUFFICIENT", notes, {
         "guard_status": guard_status,
         "guard_age_sec": age_sec,
         "telegram_enabled": telegram.get("enabled"),
         "telegram_dry_run": telegram.get("dry_run"),
-        "telegram_last_error_reason": "send_error: http_401_unauthorized" if telegram_status == "TELEGRAM_UNAUTHORIZED" else ("telegram_error" if last_error else ""),
-        "telegram_status": telegram_status,
+        "telegram_last_error_reason": tg_last_err_label,
+        "telegram_status": tg_diag["telegram_status"],
+        "telegram_auth_status": tg_diag["telegram_auth_status"],
+        "telegram_error_status": tg_diag["telegram_error_status"],
+        "is_current_unauthorized": is_current_unauth,
+        "_tg_diag": tg_diag,
     })
 
 
@@ -620,8 +749,10 @@ def _apply_caps(
     guard = context.get("guard_status") or {}
     if guard.get("is_stale") or guard.get("overall_status") == "STALE":
         caps.append((78, "JC Guard STALE"))
-    if "401" in str(scores["ops_reliability_score"].details.get("telegram_last_error_reason", "")):
-        caps.append((78, "Telegram 401 unauthorized"))
+    # Telegram 401 cap: CURRENT_UNAUTHORIZED only
+    ops_details = scores["ops_reliability_score"].details
+    if ops_details.get("is_current_unauthorized"):
+        caps.append((78, "Telegram current 401 unauthorized"))
     # Forward Test cap: distinguish API_UNAVAILABLE from real n=0
     ft_details = scores["forward_test_score"].details
     ft_status = ft_details.get("forward_test_status") or ft_details.get("status") or "DATA_INSUFFICIENT"
@@ -639,10 +770,15 @@ def _apply_caps(
     elif av_status == "READ_ERROR":
         caps.append((88, "AlphaForge Validation READ_ERROR"))
     # FOUND → no cap
+    # Quote coverage cap: only when total > 0 and coverage confirmed < 90%
     quote_details = scores["quote_coverage_score"].details
-    quote_cov = _score_from_ratio(_to_int(quote_details.get("success")), _to_int(quote_details.get("total")))
-    if quote_details.get("total") and quote_cov < 90:
-        caps.append((82, "quote coverage < 90%"))
+    quote_total = _to_int(quote_details.get("total"))
+    if quote_total > 0:
+        quote_cov = _score_from_ratio(_to_int(quote_details.get("success")), quote_total)
+        if quote_cov < 90:
+            caps.append((82, "quote coverage < 90%"))
+    elif quote_total == 0 and scores["quote_coverage_score"].status == "DATA_INSUFFICIENT":
+        caps.append((82, "quote coverage DATA_INSUFFICIENT"))
     market_details = scores["market_gate_score"].details
     if market_details.get("market_gate_level") in ("RISK_OFF", "CRASH") and _to_int(market_details.get("buy_count")) > 0:
         caps.append((60, "MARKET_CLOSED/CRASH에서 BUY 발생"))
@@ -690,6 +826,28 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
     realtime_details = scores["realtime_strength_score"].details
     ft_details = scores["forward_test_score"].details
     av_details = scores["alphaforge_validation_link_score"].details
+    ops_details = scores["ops_reliability_score"].details
+    tg_diag = ops_details.get("_tg_diag") or {}
+    quote_details = scores["quote_coverage_score"].details
+    quote_total = _to_int(quote_details.get("total"))
+    quote_success = _to_int(quote_details.get("success"))
+    quote_missing = _to_int(quote_details.get("missing"))
+    quote_cov_pct = round(_score_from_ratio(quote_success, quote_total), 1) if quote_total > 0 else None
+    quote_status = (
+        "OK" if quote_total > 0 and quote_cov_pct is not None and quote_cov_pct >= 90
+        else "LOW_COVERAGE" if quote_total > 0
+        else "DATA_INSUFFICIENT"
+    )
+    quote_reason = (
+        f"quote coverage {quote_cov_pct}% ({quote_success}/{quote_total})"
+        if quote_total > 0
+        else "quote 데이터 없음 (API 미연결 또는 미수집)"
+    )
+    quote_source = (
+        "api:themes.quote_polling"
+        if (context.get("themes") or {}).get("quote_polling")
+        else "DATA_INSUFFICIENT"
+    )
     return {
         "generated_at": _now_iso(),
         "score_context": score_context,
@@ -697,15 +855,36 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
         "overall_jc_practicality_score": round(capped, 1),
         "raw_overall_score": round(raw, 1),
         "confidence": confidence,
-        # ── Top-level flat fields required by spec ─────────────────────────────
+        # ── AlphaForge Validation ────────────────────────────────────────────
         "alphaforge_validation_status": av_details.get("alphaforge_validation_status", "DATA_NA"),
         "alphaforge_validation_link_score": round(scores["alphaforge_validation_link_score"].value, 1),
         "alphaforge_validation_source_type": av_details.get("alphaforge_validation_source_type", "DATA_NA"),
         "alphaforge_validation_path_found": av_details.get("alphaforge_validation_path_found", []),
         "alphaforge_validation_reason": av_details.get("alphaforge_validation_reason", ""),
+        # ── Forward Test ─────────────────────────────────────────────────────
         "forward_test_status": ft_details.get("forward_test_status") or ft_details.get("status", "DATA_INSUFFICIENT"),
         "forward_test_sample_n": _to_int(ft_details.get("forward_test_sample_n") or ft_details.get("sample_count", 0)),
         "forward_test_reason": ft_details.get("forward_test_reason", ""),
+        # ── Telegram (sanitized, no token/chat_id values) ────────────────────
+        "telegram_status": tg_diag.get("telegram_status", ops_details.get("telegram_status", "TELEGRAM_DATA_NA")),
+        "telegram_auth_status": tg_diag.get("telegram_auth_status", "DATA_NA"),
+        "telegram_error_status": tg_diag.get("telegram_error_status", "DATA_NA"),
+        "telegram_failed_today_count": tg_diag.get("telegram_failed_today_count"),
+        "telegram_sent_today_count": tg_diag.get("telegram_sent_today_count"),
+        "telegram_skipped_today_count": tg_diag.get("telegram_skipped_today_count"),
+        "telegram_last_error_at": tg_diag.get("telegram_last_error_at"),
+        "telegram_last_ok_at": tg_diag.get("telegram_last_ok_at"),
+        "telegram_last_error_reason_sanitized": tg_diag.get("telegram_last_error_reason_sanitized", ""),
+        "telegram_reason": tg_diag.get("telegram_reason", ""),
+        # ── Quote Coverage ───────────────────────────────────────────────────
+        "quote_coverage_score": round(scores["quote_coverage_score"].value, 1),
+        "quote_coverage_pct": quote_cov_pct,
+        "quote_total": quote_total if quote_total > 0 else None,
+        "quote_success": quote_success if quote_total > 0 else None,
+        "quote_missing": quote_missing if quote_total > 0 else None,
+        "quote_status": quote_status,
+        "quote_reason": quote_reason,
+        "quote_source": quote_source,
         # ── Sub-scores ────────────────────────────────────────────────────────
         "scores": {
             key: {
@@ -723,8 +902,12 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
         "guard_timestamp_diagnostics": guard_diag,
         "alphaforge_validation_diagnostics": av_details,
         "telegram_diagnostics": {
-            "telegram_status": scores["ops_reliability_score"].details.get("telegram_status"),
-            "last_error_status": scores["ops_reliability_score"].details.get("telegram_last_error_reason"),
+            "telegram_status": tg_diag.get("telegram_status", ops_details.get("telegram_status")),
+            "telegram_auth_status": tg_diag.get("telegram_auth_status"),
+            "telegram_error_status": tg_diag.get("telegram_error_status"),
+            "last_error_status": ops_details.get("telegram_last_error_reason"),
+            "last_error_reason_sanitized": tg_diag.get("telegram_last_error_reason_sanitized"),
+            "telegram_reason": tg_diag.get("telegram_reason"),
         },
         "realtime_strength_status": realtime_details.get("realtime_strength_status"),
         "realtime_strength_reason": realtime_details.get("realtime_strength_reason"),
@@ -740,7 +923,7 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
             "quote_polling": themes.get("quote_polling", {}),
             "supply_polling": themes.get("supply_polling", {}),
             "guard_status": (context.get("guard_status") or {}).get("overall_status"),
-            "telegram_error": scores["ops_reliability_score"].details.get("telegram_last_error_reason", ""),
+            "telegram_error": ops_details.get("telegram_last_error_reason", ""),
             "alphaforge_validation_available": (context.get("alphaforge_validation") or {}).get("available", False),
         },
     }
@@ -895,17 +1078,35 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- ops_reliability_score: {scores['ops_reliability_score']['score']}",
         f"- notes: {', '.join(scores['ops_reliability_score']['notes']) or '-'}",
         "",
+        "## Telegram 상태 진단",
+        f"- telegram_status: {report.get('telegram_status')}",
+        f"- telegram_auth_status: {report.get('telegram_auth_status')}",
+        f"- telegram_error_status: {report.get('telegram_error_status')}",
+        f"- telegram_failed_today_count: {report.get('telegram_failed_today_count')}",
+        f"- telegram_sent_today_count: {report.get('telegram_sent_today_count')}",
+        f"- telegram_skipped_today_count: {report.get('telegram_skipped_today_count')}",
+        f"- telegram_last_error_at: {report.get('telegram_last_error_at')}",
+        f"- telegram_last_ok_at: {report.get('telegram_last_ok_at')}",
+        f"- telegram_last_error_reason_sanitized: {report.get('telegram_last_error_reason_sanitized') or '-'}",
+        f"- telegram_reason: {report.get('telegram_reason')}",
+        "- 민감 환경값은 리포트에 포함하지 않습니다.",
+        "",
+        "## Quote Coverage 진단",
+        f"- quote_coverage_score: {report.get('quote_coverage_score')}",
+        f"- quote_status: {report.get('quote_status')}",
+        f"- quote_coverage_pct: {report.get('quote_coverage_pct')}",
+        f"- quote_total: {report.get('quote_total')}",
+        f"- quote_success: {report.get('quote_success')}",
+        f"- quote_missing: {report.get('quote_missing')}",
+        f"- quote_reason: {report.get('quote_reason')}",
+        f"- quote_source: {report.get('quote_source')}",
+        "",
         "## Guard timestamp 진단",
         f"- guard_timestamp_parse_status: {guard_diag.get('guard_timestamp_parse_status')}",
         f"- guard_timestamp_raw: {guard_diag.get('guard_timestamp_raw')}",
         f"- guard_age_minutes: {guard_diag.get('guard_age_minutes')}",
         f"- guard_age_anomaly: {guard_diag.get('guard_age_anomaly')}",
         f"- guard_age_reason: {guard_diag.get('guard_age_reason')}",
-        "",
-        "## Telegram 상태 진단",
-        f"- telegram_status: {tg_diag.get('telegram_status')}",
-        f"- last_error_status: {tg_diag.get('last_error_status') or '-'}",
-        "- 민감 환경값은 리포트에 포함하지 않습니다.",
         "",
         "## AlphaForge Validation 연동 상태",
         f"- alphaforge_validation_status: **{av_status}**",

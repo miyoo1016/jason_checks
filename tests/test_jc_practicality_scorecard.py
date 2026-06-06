@@ -363,3 +363,140 @@ def test_top_level_fields_not_none():
     for field in required_fields:
         assert field in report, f"Missing field: {field}"
         assert report[field] is not None, f"Field {field!r} is None"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Telegram 401 historical/current discrimination tests
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_telegram_401_historical_recovered_no_cap():
+    """last_ok_at > last_error_at + failed_today=0 → HISTORICAL 판단, cap 없음."""
+    ctx = _base_context()
+    ctx["telegram_status"] = {
+        "enabled": True,
+        "configured": True,
+        "credentials_present": True,
+        "last_error_reason": "send_error: http_401_unauthorized Unauthorized",
+        "last_error_at": 1780545764980,
+        "last_ok_at": 1780638322024,   # last_ok_at > last_error_at
+        "failed_today_count": 0,
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["telegram_auth_status"] == "HISTORICAL_UNAUTHORIZED_RECOVERED", \
+        f"Expected HISTORICAL_UNAUTHORIZED_RECOVERED, got {report['telegram_auth_status']}"
+    assert report["telegram_error_status"] == "HISTORICAL_ERROR_RECOVERED"
+    # cap에 Telegram 401 없음
+    for reason in report["cap_reasons"]:
+        assert "Telegram" not in reason or "401" not in reason, \
+            f"Telegram 401 cap should NOT appear for historical: {reason}"
+    # ops score 보다 크게 패널티 없음 (>= 80)
+    ops_score = report["scores"]["ops_reliability_score"]["score"]
+    assert ops_score >= 80, f"Expected ops_score >= 80 for historical error, got {ops_score}"
+
+
+def test_telegram_401_current_unauthorized_triggers_cap():
+    """last_ok_at이 없으면 CURRENT_UNAUTHORIZED → cap 적용."""
+    ctx = _base_context()
+    ctx["telegram_status"] = {
+        "enabled": True,
+        "configured": True,
+        "credentials_present": True,
+        "last_error_reason": "send_error: http_401_unauthorized Unauthorized",
+        "last_error_at": 1780638322024,
+        # last_ok_at 없음
+        "failed_today_count": 0,
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["telegram_auth_status"] == "CURRENT_UNAUTHORIZED", \
+        f"Expected CURRENT_UNAUTHORIZED, got {report['telegram_auth_status']}"
+    assert any("Telegram current 401 unauthorized" in r for r in report["cap_reasons"]), \
+        f"Expected Telegram cap for current 401, got: {report['cap_reasons']}"
+    assert report["scores"]["ops_reliability_score"]["score"] <= 60
+
+
+def test_telegram_401_last_error_at_newer_than_ok_is_current():
+    """last_error_at > last_ok_at이면 CURRENT_UNAUTHORIZED."""
+    ctx = _base_context()
+    ctx["telegram_status"] = {
+        "enabled": True,
+        "configured": True,
+        "credentials_present": True,
+        "last_error_reason": "send_error: http_401_unauthorized",
+        "last_error_at": 1780700000000,   # newer
+        "last_ok_at": 1780600000000,       # older
+        "failed_today_count": 0,
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["telegram_auth_status"] == "CURRENT_UNAUTHORIZED"
+    assert report["telegram_error_status"] == "CURRENT_ERROR_401"
+
+
+def test_telegram_fields_no_token_in_report():
+    """telegram 필드에 token/chat_id 실제 값이 없어야 한다."""
+    ctx = _base_context()
+    ctx["telegram_status"] = {
+        "enabled": True,
+        "configured": True,
+        "token_present": True,
+        "chat_id_present": True,
+        "last_error_reason": "send_error: http_401_unauthorized Unauthorized",
+        "last_error_at": 1780545764980,
+        "last_ok_at": 1780638322024,
+        "failed_today_count": 0,
+        "sent_today_count": 5,
+        "skipped_today_count": 1,
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    rendered = render_markdown(report)
+    # top-level fields populated
+    assert report["telegram_auth_status"] is not None
+    assert report["telegram_error_status"] is not None
+    assert report["telegram_failed_today_count"] == 0
+    assert report["telegram_sent_today_count"] == 5
+    assert report["telegram_skipped_today_count"] == 1
+    assert report["telegram_last_error_at"] == 1780545764980
+    assert report["telegram_last_ok_at"] == 1780638322024
+    # no sensitive values
+    assert "TOKEN" not in rendered.upper()
+    assert "CHAT_ID" not in rendered.upper()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Quote coverage top-level fields and cap precision tests
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_quote_coverage_top_level_fields_present():
+    """quote coverage top-level 필드가 None 없이 존재한다."""
+    ctx = _base_context()
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    for field in ["quote_coverage_score", "quote_coverage_pct", "quote_total",
+                  "quote_success", "quote_missing", "quote_status", "quote_reason", "quote_source"]:
+        assert field in report, f"Missing field: {field}"
+    # base_context has quote_polling total=96, success=96 → pct=100%
+    assert report["quote_total"] == 96
+    assert report["quote_success"] == 96
+    assert report["quote_coverage_pct"] == 100.0
+    assert report["quote_status"] == "OK"
+
+
+def test_quote_coverage_low_triggers_cap():
+    """quote coverage < 90% 이고 total > 0이면 cap reason 추가."""
+    ctx = _base_context()
+    ctx["themes"]["quote_polling"]["success"] = 40
+    ctx["themes"]["quote_polling"]["total"] = 96
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["quote_status"] == "LOW_COVERAGE"
+    assert any("quote coverage < 90%" in r for r in report["cap_reasons"]), \
+        f"Expected quote cap, got: {report['cap_reasons']}"
+
+
+def test_quote_coverage_no_data_no_false_cap():
+    """quote total=0이면 quote coverage < 90% cap이 아니라 DATA_INSUFFICIENT cap 사용."""
+    ctx = _base_context()
+    ctx["themes"]["quote_polling"] = {"total": 0, "success": 0, "missing": 0}
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["quote_total"] is None
+    assert report["quote_status"] == "DATA_INSUFFICIENT"
+    for r in report["cap_reasons"]:
+        assert "quote coverage < 90%" not in r, \
+            f"Should NOT have '< 90%' cap when data is missing: {r}"
