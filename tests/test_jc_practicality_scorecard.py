@@ -191,3 +191,49 @@ def test_reports_render_without_dashboard_imports(tmp_path, monkeypatch):
     assert (tmp_path / "score.json").exists()
     assert (tmp_path / "score.md").exists()
     assert paths["json"].endswith("score.json")
+
+
+def test_alphaforge_validation_loader_finds_jo_scorecard_json(monkeypatch, tmp_path):
+    import jason_checks.web.app as web_app
+
+    report = tmp_path / "alphaforge_performance_scorecard.json"
+    report.write_text(
+        '{"generated_at":"2026-06-06T17:29:49","scores":{"overall_practicality_score":61.5,"confidence":"LOW","cap_reasons":["sample insufficient"]},"input_counts":{"candidate_rows":2,"snapshot_rows":1},"horizons":["1d"],"performance":{"by_label":{}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app, "_AV_REPORT_CANDIDATES", [(report, "JO_SCORECARD_JSON")])
+    monkeypatch.setattr(web_app, "_av_cache", {})
+    monkeypatch.setattr(web_app, "_av_last_mtime", -1.0)
+    monkeypatch.setattr(web_app, "_av_last_path", "")
+    data = web_app._load_alphaforge_validation()
+    assert data["status"] == "FOUND"
+    assert data["source_type"] == "JO_SCORECARD_JSON"
+    assert data["overall_practicality_score"] == 61.5
+    assert data["confidence"] == "LOW"
+
+
+def test_alphaforge_validation_loader_missing_is_data_na(monkeypatch, tmp_path):
+    import jason_checks.web.app as web_app
+
+    monkeypatch.setattr(web_app, "_AV_REPORT_CANDIDATES", [(tmp_path / "missing.json", "JO_SCORECARD_JSON")])
+    monkeypatch.setattr(web_app, "_av_cache", {})
+    monkeypatch.setattr(web_app, "_av_last_mtime", -1.0)
+    monkeypatch.setattr(web_app, "_av_last_path", "")
+    data = web_app._load_alphaforge_validation()
+    assert data["status"] == "DATA_NA"
+    assert data["source_type"] == "DATA_NA"
+
+
+def test_alphaforge_validation_loader_tolerates_partial_json(monkeypatch, tmp_path):
+    import jason_checks.web.app as web_app
+
+    report = tmp_path / "partial.json"
+    report.write_text('{"generated_at":"2026-06-06T17:29:49","scores":{}}', encoding="utf-8")
+    monkeypatch.setattr(web_app, "_AV_REPORT_CANDIDATES", [(report, "JO_SCORECARD_JSON")])
+    monkeypatch.setattr(web_app, "_av_cache", {})
+    monkeypatch.setattr(web_app, "_av_last_mtime", -1.0)
+    monkeypatch.setattr(web_app, "_av_last_path", "")
+    data = web_app._load_alphaforge_validation()
+    assert data["status"] == "FOUND"
+    assert data["overall_practicality_score"] is None
+    assert data["confidence"] == "DATA_NA"

@@ -455,6 +455,14 @@
                             <div>
                                 <!-- 헤더 요약 -->
                                 <div class="flex flex-wrap gap-3 mb-2 text-[10px] font-bold text-slate-700">
+                                    <span class="bg-indigo-600 text-white rounded px-2 py-0.5"
+                                          x-text="`상태 ${alphaForgeValidation.status || (alphaForgeValidation.available ? 'FOUND' : 'DATA_NA')}`"></span>
+                                    <template x-if="alphaForgeValidation.overall_practicality_score !== null && alphaForgeValidation.overall_practicality_score !== undefined">
+                                        <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                              x-text="`JO 실전성 ${Number(alphaForgeValidation.overall_practicality_score).toFixed(1)}점`"></span>
+                                    </template>
+                                    <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
+                                          x-text="`confidence ${alphaForgeValidation.confidence || 'DATA_NA'}`"></span>
                                     <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
                                           x-text="`신호 ${alphaForgeValidation.signal_count}건 → 평가 ${alphaForgeValidation.evaluated_count}건`"></span>
                                     <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
@@ -465,7 +473,24 @@
                                         <span class="bg-white rounded border border-indigo-100 px-2 py-0.5"
                                               x-text="`데이터 ${alphaForgeValidation.data_date_range.earliest} ~ ${alphaForgeValidation.data_date_range.latest}`"></span>
                                     </template>
+                                    <template x-if="alphaForgeValidation.source_type">
+                                        <span class="text-[9px] text-indigo-400 font-semibold truncate max-w-[360px]"
+                                              :title="alphaForgeValidation.source_path || ''"
+                                              x-text="`${alphaForgeValidation.source_type} · ${alphaForgeValidation.source_path || '-'}`"></span>
+                                    </template>
                                 </div>
+
+                                <template x-if="(alphaForgeValidation.cap_reasons || []).length > 0">
+                                    <div class="flex flex-wrap gap-1.5 mb-2">
+                                        <template x-for="reason in alphaForgeValidation.cap_reasons" :key="reason">
+                                            <span class="text-[9px] font-bold rounded bg-amber-50 text-amber-700 border border-amber-100 px-1.5 py-0.5" x-text="reason"></span>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <template x-if="alphaForgeValidation.summary">
+                                    <div class="text-[9.5px] text-slate-500 font-semibold mb-2" x-text="alphaForgeValidation.summary"></div>
+                                </template>
 
                                 <!-- Overall 5개 기간 -->
                                 <div class="text-[9.5px] font-black text-indigo-800 mb-1 uppercase tracking-wider">전체 종합</div>

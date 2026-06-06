@@ -626,31 +626,222 @@ async def _telegram_alert_loop(app):
 # AlphaForge Validation Report (read-only, from JO)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_AV_REPORT_PATH = Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json")
+_AV_REPORT_CANDIDATES = [
+    (Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.json"), "JO_SCORECARD_JSON"),
+    (Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.md"), "JO_SCORECARD_MD"),
+    (Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json"), "JO_VALIDATION_SUMMARY_JSON"),
+    (Path("reports/alphaforge_performance_scorecard.json"), "JC_INTERNAL_JSON"),
+    (Path("data/reports/alphaforge_performance_scorecard.json"), "JC_INTERNAL_JSON"),
+    (Path("data/exports/alphaforge_validation.json"), "JC_INTERNAL_JSON"),
+]
 _av_cache: dict = {}          # 마지막으로 읽은 summary 딕셔너리
 _av_last_mtime: float = -1.0  # os.stat mtime 추적용
+_av_last_path: str = ""
+
+
+def _safe_ratio(value):
+    try:
+        if value is None:
+            return None
+        number = float(value)
+        return number / 100 if abs(number) > 1 else number
+    except Exception:
+        return None
+
+
+def _av_source_candidates() -> list[tuple[Path, str]]:
+    return [(path if path.is_absolute() else Path.cwd() / path, source_type) for path, source_type in _AV_REPORT_CANDIDATES]
+
+
+def _empty_alphaforge_validation(reason: str = "AlphaForge 검증 리포트 없음") -> dict:
+    checked = [str(path) for path, _ in _av_source_candidates()]
+    return {
+        "available": False,
+        "status": "DATA_NA",
+        "reason": reason,
+        "source_path": "",
+        "source_type": "DATA_NA",
+        "overall_practicality_score": None,
+        "confidence": "DATA_NA",
+        "generated_at": "",
+        "report_created_at": "",
+        "summary": reason,
+        "cap_reasons": [],
+        "sample_status": "DATA_NA",
+        "path_checked": checked,
+        "path_found": [],
+    }
+
+
+def _window_from_performance_row(row: dict) -> dict:
+    sample_status = row.get("sample_status") or ("DATA_INSUFFICIENT" if row.get("n", 0) == 0 else "OK")
+    return {
+        "insufficient": sample_status != "OK",
+        "n": row.get("n", 0),
+        "note": sample_status if sample_status != "OK" else "",
+        "avg_return": _safe_ratio(row.get("avg_return")),
+        "avg_alpha": _safe_ratio(row.get("excess_return")),
+        "avg_net_alpha": _safe_ratio(row.get("excess_return")),
+        "win_rate": _safe_ratio(row.get("win_rate")),
+        "sample_status": sample_status,
+    }
+
+
+def _normalize_performance_scorecard(data: dict, source_path: Path, source_type: str) -> dict:
+    scores = data.get("scores") or {}
+    input_counts = data.get("input_counts") or {}
+    horizons_raw = data.get("horizons") or ["1d", "3d", "5d", "10d"]
+    windows = []
+    for item in horizons_raw:
+        text = str(item).lower().replace("d", "")
+        try:
+            windows.append(int(text))
+        except Exception:
+            continue
+
+    by_label = ((data.get("performance") or {}).get("by_label") or {})
+    label_counts = data.get("label_counts") or {}
+    by_alert_type = {}
+    for label, label_data in by_label.items():
+        windows_map = {}
+        for window in windows:
+            row = label_data.get(f"{window}d", {}) if isinstance(label_data, dict) else {}
+            windows_map[str(window)] = _window_from_performance_row(row)
+        by_alert_type[label] = {
+            "n": label_counts.get(label, max((w.get("n", 0) for w in windows_map.values()), default=0)),
+            "windows": windows_map,
+        }
+
+    overall = {}
+    for window in windows:
+        rows = [
+            (label_data or {}).get(f"{window}d", {})
+            for label_data in by_label.values()
+            if isinstance(label_data, dict)
+        ]
+        n_total = sum(int(row.get("n") or 0) for row in rows)
+        valid = [row for row in rows if int(row.get("n") or 0) > 0 and row.get("sample_status") == "OK"]
+        if not valid:
+            overall[str(window)] = {
+                "insufficient": True,
+                "n": n_total,
+                "note": "sample insufficient",
+                "sample_status": "DATA_INSUFFICIENT",
+            }
+            continue
+        avg_net_alpha = sum((_safe_ratio(row.get("excess_return")) or 0) * int(row.get("n") or 0) for row in valid) / max(sum(int(row.get("n") or 0) for row in valid), 1)
+        win_rate = sum((_safe_ratio(row.get("win_rate")) or 0) * int(row.get("n") or 0) for row in valid) / max(sum(int(row.get("n") or 0) for row in valid), 1)
+        overall[str(window)] = {
+            "insufficient": False,
+            "n": n_total,
+            "avg_net_alpha": avg_net_alpha,
+            "win_rate": win_rate,
+            "sample_status": "OK",
+        }
+
+    cap_reasons = scores.get("cap_reasons") or []
+    sample_status = "LOW_CONFIDENCE" if cap_reasons else "OK"
+    return {
+        "available": True,
+        "status": "FOUND",
+        "source_path": str(source_path),
+        "source_type": source_type,
+        "overall_practicality_score": scores.get("overall_practicality_score"),
+        "confidence": scores.get("confidence") or "DATA_NA",
+        "generated_at": data.get("generated_at", ""),
+        "report_created_at": data.get("generated_at", ""),
+        "summary": scores.get("reason") or data.get("version") or "AlphaForge Performance Scorecard",
+        "cap_reasons": cap_reasons,
+        "sample_status": sample_status,
+        "path_checked": [str(path) for path, _ in _av_source_candidates()],
+        "path_found": [str(source_path)],
+        "signal_count": input_counts.get("candidate_rows", 0),
+        "evaluated_count": input_counts.get("snapshot_rows", 0),
+        "benchmark": "DATA_NA",
+        "transaction_cost_rt": 0,
+        "windows": windows,
+        "min_n": 20,
+        "overall": {"n": input_counts.get("snapshot_rows", 0), **overall},
+        "by_alert_type": by_alert_type,
+        "raw_scores": scores,
+    }
+
+
+def _normalize_legacy_validation_summary(data: dict, source_path: Path, source_type: str) -> dict:
+    if not isinstance(data, dict) or "overall" not in data:
+        return {}
+    result = dict(data)
+    result.update({
+        "available": True,
+        "status": "FOUND",
+        "source_path": str(source_path),
+        "source_type": source_type,
+        "overall_practicality_score": data.get("overall_practicality_score"),
+        "confidence": data.get("confidence") or "DATA_NA",
+        "report_created_at": data.get("generated_at", ""),
+        "summary": data.get("summary", ""),
+        "cap_reasons": data.get("cap_reasons", []),
+        "sample_status": data.get("sample_status", "DATA_NA"),
+        "path_checked": [str(path) for path, _ in _av_source_candidates()],
+        "path_found": [str(source_path)],
+    })
+    return result
 
 
 def _load_alphaforge_validation() -> dict:
-    """JO가 생성한 summary.json을 안전하게 읽어 반환한다. 실패하면 빈 dict."""
-    global _av_cache, _av_last_mtime
+    """JO AlphaForge validation/performance reports를 안전하게 읽어 반환한다."""
+    global _av_cache, _av_last_mtime, _av_last_path
     try:
-        if not _AV_REPORT_PATH.exists():
-            return {}
-        mtime = _AV_REPORT_PATH.stat().st_mtime
-        if mtime == _av_last_mtime and _av_cache:
-            return _av_cache
-        with _AV_REPORT_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        # 최소 필드 확인
-        if not isinstance(data, dict) or "overall" not in data:
-            return {}
-        _av_last_mtime = mtime
-        _av_cache = data
-        return data
+        checked = []
+        for path, source_type in _av_source_candidates():
+            checked.append(str(path))
+            if not path.exists():
+                continue
+            mtime = path.stat().st_mtime
+            cache_key = str(path)
+            if mtime == _av_last_mtime and cache_key == _av_last_path and _av_cache:
+                return _av_cache
+            if source_type == "JO_SCORECARD_MD":
+                result = {
+                    **_empty_alphaforge_validation("JO AlphaForge markdown scorecard found; JSON report unavailable"),
+                    "available": True,
+                    "status": "FOUND",
+                    "source_path": str(path),
+                    "source_type": source_type,
+                    "confidence": "DATA_NA",
+                    "summary": "Markdown 리포트만 존재합니다. JSON 점수 필드는 DATA_NA입니다.",
+                    "path_checked": checked,
+                    "path_found": [str(path)],
+                }
+            else:
+                with path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if source_type == "JO_SCORECARD_JSON":
+                    result = _normalize_performance_scorecard(data, path, source_type)
+                else:
+                    result = _normalize_legacy_validation_summary(data, path, source_type)
+                if not result:
+                    return {
+                        **_empty_alphaforge_validation("AlphaForge validation schema mismatch"),
+                        "status": "READ_ERROR",
+                        "source_path": str(path),
+                        "source_type": source_type,
+                        "path_checked": checked,
+                        "path_found": [str(path)],
+                    }
+            _av_last_mtime = mtime
+            _av_last_path = cache_key
+            _av_cache = result
+            logger.info("alphaforge_validation_loaded", source_path=str(path), source_type=source_type, status=result.get("status"))
+            return result
+        return _empty_alphaforge_validation()
     except Exception as e:
         logger.warning("alphaforge_validation_load_error", error=str(e))
-        return {}
+        return {
+            **_empty_alphaforge_validation("AlphaForge 검증 리포트 읽기 실패"),
+            "status": "READ_ERROR",
+            "error": f"read_error:{type(e).__name__}",
+        }
 
 
 async def _alphaforge_validation_loop(app):
@@ -829,59 +1020,19 @@ def create_app() -> FastAPI:
 
     @app.get("/api/alphaforge-validation")
     async def get_alphaforge_validation():
-        """JO의 AlphaForge validation summary.json을 읽기 전용으로 반환한다."""
+        """JO의 AlphaForge validation/performance report를 읽기 전용으로 반환한다."""
         try:
             data = _load_alphaforge_validation()
             if not data:
-                return {
-                    "available": False,
-                    "reason": "AlphaForge 검증 리포트 없음",
-                }
-            overall = data.get("overall", {})
-            by_alert = data.get("by_alert_type", {})
-            windows = data.get("windows", [1, 3, 5, 10, 20])
-            min_n = data.get("min_n_for_stats", 20)
-
-            def _window_stat(section: dict, w: int) -> dict:
-                key = f"{w}d"
-                wdata = section.get(key, {})
-                if wdata.get("insufficient", True):
-                    n_valid = wdata.get("n_valid", 0)
-                    return {"insufficient": True, "n": n_valid, "note": f"n={n_valid} < {min_n}, 통계 부족"}
-                return {
-                    "insufficient": False,
-                    "n": wdata.get("n_valid", 0),
-                    "avg_return": wdata.get("avg_return"),
-                    "avg_alpha": wdata.get("avg_alpha"),
-                    "avg_net_alpha": wdata.get("avg_net_alpha"),
-                    "win_rate": wdata.get("win_rate"),
-                }
-
-            overall_stats = {str(w): _window_stat(overall, w) for w in windows}
-
-            by_type_stats = {}
-            for alert_type, adata in by_alert.items():
-                by_type_stats[alert_type] = {
-                    "n": adata.get("n", 0),
-                    "windows": {str(w): _window_stat(adata, w) for w in windows},
-                }
-
-            return {
-                "available": True,
-                "generated_at": data.get("generated_at", ""),
-                "data_date_range": data.get("data_date_range", {}),
-                "signal_count": data.get("total_signals_loaded", 0),
-                "evaluated_count": data.get("computed_signals", 0),
-                "benchmark": data.get("benchmark", ""),
-                "transaction_cost_rt": data.get("transaction_cost_rt", 0),
-                "windows": windows,
-                "min_n": min_n,
-                "overall": {"n": overall.get("n", 0), **overall_stats},
-                "by_alert_type": by_type_stats,
-            }
+                return _empty_alphaforge_validation()
+            return data
         except Exception as e:
             logger.warning("alphaforge_validation_api_error", error=str(e))
-            return {"available": False, "reason": "AlphaForge 검증 리포트 없음"}
+            return {
+                **_empty_alphaforge_validation("AlphaForge 검증 리포트 읽기 실패"),
+                "status": "READ_ERROR",
+                "error": f"read_error:{type(e).__name__}",
+            }
 
     @app.post("/api/market")
     async def switch_market(payload: dict = Body(...)):
