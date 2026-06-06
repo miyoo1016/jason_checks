@@ -237,3 +237,129 @@ def test_alphaforge_validation_loader_tolerates_partial_json(monkeypatch, tmp_pa
     assert data["status"] == "FOUND"
     assert data["overall_practicality_score"] is None
     assert data["confidence"] == "DATA_NA"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# New tests per spec (Section 7)
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_jo_scorecard_found_means_top_level_alphaforge_status_found():
+    """JO scorecard json이 존재하면 CLI Scorecard top-level에 alphaforge_validation_status=FOUND."""
+    ctx = _base_context()
+    # Simulate the shared loader already finding the file
+    ctx["alphaforge_validation"] = {
+        "status": "FOUND",
+        "available": True,
+        "source_type": "JO_SCORECARD_JSON",
+        "path_found": "/some/jo/report.json",
+        "paths_checked": ["/some/jo/report.json"],
+        "reason": "AlphaForge 검증 리포트 로드 성공: JO_SCORECARD_JSON (report.json)",
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["alphaforge_validation_status"] == "FOUND", \
+        f"Expected FOUND, got {report['alphaforge_validation_status']}"
+    assert report["alphaforge_validation_link_score"] is not None
+    assert report["alphaforge_validation_source_type"] == "JO_SCORECARD_JSON"
+    assert "/some/jo/report.json" in report["alphaforge_validation_path_found"]
+
+
+def test_found_means_no_data_na_cap_reason():
+    """FOUND이면 cap_reasons에 AlphaForge DATA_NA 문구가 없다."""
+    ctx = _base_context()
+    ctx["alphaforge_validation"] = {
+        "status": "FOUND",
+        "available": True,
+        "source_type": "JO_SCORECARD_JSON",
+        "path_found": "/some/jo/report.json",
+        "paths_checked": ["/some/jo/report.json"],
+        "reason": "OK",
+    }
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    for reason in report["cap_reasons"]:
+        assert "AlphaForge Validation DATA_NA" not in reason, \
+            f"Unexpected DATA_NA cap when FOUND: {reason}"
+        assert "미연동 또는 DATA_NA" not in reason, \
+            f"Unexpected '미연동 또는 DATA_NA' cap when FOUND: {reason}"
+
+
+def test_closed_review_offline_no_strength_data_is_not_evaluable():
+    """CLOSED_REVIEW + API fallback + 체결강도 데이터 부족이면 realtime_strength_evaluable=false."""
+    ctx = _base_context(session="MARKET_CLOSED")
+    # Simulate no strength data at all (total=0) — offline/closed
+    ctx["themes"]["quote_polling"] = {
+        "total": 0,
+        "success": 0,
+        "missing": 0,
+        "strength_total": 0,
+        "strength_success": 0,
+    }
+    ctx["decision_summary"]["results"] = []
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["score_context"] == "CLOSED_REVIEW"
+    assert report["realtime_strength_evaluable"] is False, \
+        f"Expected evaluable=False, got {report['realtime_strength_evaluable']}"
+    assert report["realtime_strength_status"] in (
+        "NOT_EVALUATED_SESSION_CLOSED",
+        "NOT_EVALUATED_OFFLINE_CLOSED",
+    ), f"Unexpected status: {report['realtime_strength_status']}"
+
+
+def test_closed_review_no_strength_cap_not_applied():
+    """CLOSED_REVIEW에서는 체결강도 커버리지 부족 cap이 적용되지 않는다."""
+    ctx = _base_context(session="MARKET_CLOSED")
+    ctx["themes"]["quote_polling"]["strength_success"] = 0
+    ctx["themes"]["quote_polling"]["strength_total"] = 96
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["score_context"] == "CLOSED_REVIEW"
+    for reason in report["cap_reasons"]:
+        assert "체결강도 커버리지 0%" not in reason, \
+            f"체결강도 cap should NOT apply during CLOSED_REVIEW: {reason}"
+        assert "체결강도 커버리지 < 50%" not in reason, \
+            f"체결강도 cap should NOT apply during CLOSED_REVIEW: {reason}"
+
+
+def test_live_strength_zero_triggers_failed_and_cap():
+    """LIVE_TRADING_REVIEW + 체결강도 0%에서만 FAILED_LIVE_STRENGTH_COLLECTION 및 max 75 cap 적용."""
+    ctx = _base_context(session="LIVE", mode="LIVE")
+    ctx["themes"]["quote_polling"]["strength_success"] = 0
+    ctx["themes"]["quote_polling"]["strength_total"] = 96
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["score_context"] == "LIVE_TRADING_REVIEW"
+    assert report["realtime_strength_status"] == "FAILED_LIVE_STRENGTH_COLLECTION"
+    assert report["realtime_strength_evaluable"] is True
+    assert report["overall_jc_practicality_score"] <= 75
+    assert any("체결강도 커버리지 0%" in r for r in report["cap_reasons"]), \
+        f"Expected 체결강도 cap, got: {report['cap_reasons']}"
+
+
+def test_forward_test_api_unavailable_status_when_offline():
+    """API가 없어서 Forward Test를 못 읽은 경우 forward_test_status=API_UNAVAILABLE 또는 DATA_INSUFFICIENT."""
+    ctx = _base_context()
+    # Simulate OFFLINE_FALLBACK mode with no forward test data
+    ctx["score_data_mode"] = "OFFLINE_FALLBACK"
+    ctx["forward_test_summary"] = {}  # empty = no data
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    assert report["forward_test_status"] in ("API_UNAVAILABLE", "DATA_INSUFFICIENT"), \
+        f"Unexpected forward_test_status: {report['forward_test_status']}"
+    assert report["forward_test_sample_n"] is not None  # must not be None
+
+
+def test_top_level_fields_not_none():
+    """top-level 필드가 None으로 누락되지 않는다."""
+    ctx = _base_context()
+    ctx["alphaforge_validation"] = {"available": False, "reason": "없음"}
+    report = calculate_scorecard(ctx, now=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc))
+    required_fields = [
+        "alphaforge_validation_status",
+        "alphaforge_validation_link_score",
+        "alphaforge_validation_source_type",
+        "alphaforge_validation_path_found",
+        "alphaforge_validation_reason",
+        "score_data_mode",
+        "forward_test_status",
+        "forward_test_sample_n",
+        "forward_test_reason",
+    ]
+    for field in required_fields:
+        assert field in report, f"Missing field: {field}"
+        assert report[field] is not None, f"Field {field!r} is None"

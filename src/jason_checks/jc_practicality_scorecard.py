@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from jason_checks.alphaforge_validation_loader import (
+    load_alphaforge_validation as _load_av,
+    AV_REPORT_CANDIDATES,
+    find_alphaforge_scorecard_paths,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = ROOT / "reports"
@@ -37,14 +43,8 @@ WEIGHTS = {
 
 CLOSED_SESSIONS = {"MARKET_CLOSED", "CLOSED", "WEEKEND", "HOLIDAY", "PRE_MARKET", "AFTER_MARKET", "AFTER"}
 LIVE_SESSIONS = {"LIVE", "REGULAR", "REGULAR_SESSION"}
-ALPHAFORGE_VALIDATION_PATHS = [
-    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.json"),
-    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_performance_scorecard.md"),
-    ROOT / "reports" / "alphaforge_performance_scorecard.json",
-    ROOT / "data" / "exports" / "alphaforge_validation.json",
-    ROOT / "data" / "reports" / "alphaforge_performance_scorecard.json",
-    Path("/Users/miyoo1016/jason_octopus/reports/alphaforge_validation/summary.json"),
-]
+# Legacy alias for tests that monkeypatch this
+ALPHAFORGE_VALIDATION_PATHS = [p for p, _ in AV_REPORT_CANDIDATES]
 
 
 def _now_iso() -> str:
@@ -235,7 +235,16 @@ def _score_realtime_strength(themes: dict[str, Any], decision: dict[str, Any], c
     reason = ""
     evaluable = True
     basis = "LIVE_STRENGTH_COVERAGE"
-    if total and success == 0:
+
+    # CLOSED_REVIEW: data=0 means not collectable (not a failure)
+    if not total and closed_review:
+        score = 0
+        status = "NOT_EVALUATED_OFFLINE_CLOSED"
+        reason = "폐장/API미연결 상태 — 체결강도 데이터 미수집, 평가 제외"
+        evaluable = False
+        basis = "EXCLUDED_SESSION_CLOSED"
+        notes.append(reason)
+    elif total and success == 0:
         if closed_review:
             score = 0
             status = "NOT_EVALUATED_SESSION_CLOSED"
@@ -377,11 +386,20 @@ def _forward_sample_count(forward: dict[str, Any]) -> int:
     return sum(_to_int(v.get("count")) for v in horizons.values() if isinstance(v, dict))
 
 
-def _score_forward(forward: dict[str, Any]) -> Score:
+def _score_forward(forward: dict[str, Any], score_data_mode: str = "API_CONNECTED") -> Score:
+    # Distinguish API_UNAVAILABLE from genuine n=0
     if not forward or forward.get("status") != "OK":
-        return Score(35, "DATA_INSUFFICIENT", [forward.get("message") or "Forward Test 데이터 부족"], {
-            "sample_count": _forward_sample_count(forward or {}),
-            "status": (forward or {}).get("status", "DATA_INSUFFICIENT"),
+        ft_status = "API_UNAVAILABLE" if score_data_mode in ("OFFLINE_FALLBACK", "PARTIAL_FALLBACK") else "DATA_INSUFFICIENT"
+        msg = forward.get("message") or "Forward Test 데이터 부족"
+        n = _forward_sample_count(forward or {})
+        cap_msg = f"Forward Test {ft_status} 또는 DATA_INSUFFICIENT" if ft_status == "API_UNAVAILABLE" else f"Forward Test 표본 부족 n={n}"
+        return Score(35, ft_status, [msg], {
+            "sample_count": n,
+            "status": ft_status,
+            "forward_test_status": ft_status,
+            "forward_test_sample_n": n,
+            "forward_test_reason": msg,
+            "_cap_note": cap_msg,
         })
     sample = _forward_sample_count(forward)
     blocked = forward.get("blocked_quality") or {}
@@ -402,6 +420,10 @@ def _score_forward(forward: dict[str, Any]) -> Score:
     return Score(max(0, min(100, score)), "OK", notes, {
         "sample_count": sample,
         "blocked_quality": blocked,
+        "status": "OK",
+        "forward_test_status": "OK",
+        "forward_test_sample_n": sample,
+        "forward_test_reason": f"n={sample}",
     })
 
 
@@ -450,30 +472,67 @@ def _score_ops(guard: dict[str, Any], telegram: dict[str, Any]) -> Score:
 
 
 def _score_alphaforge_validation(validation: dict[str, Any]) -> Score:
-    checked = [str(p) for p in ALPHAFORGE_VALIDATION_PATHS]
-    existing = [str(p) for p in ALPHAFORGE_VALIDATION_PATHS if p.exists()]
-    if validation.get("available"):
+    """Score AlphaForge Validation link. Uses shared loader status."""
+    # validation may come from API (has 'available') or from shared loader (has 'status')
+    av_status = validation.get("status") or ("FOUND" if validation.get("available") else "DATA_NA")
+    path_found = validation.get("path_found") or validation.get("alphaforge_validation_path_found") or []
+    if isinstance(path_found, str):
+        path_found_list = [path_found] if path_found else []
+    else:
+        path_found_list = list(path_found)
+    paths_checked = validation.get("paths_checked") or [str(p) for p, _ in AV_REPORT_CANDIDATES]
+    source_type = validation.get("source_type") or ("JC_API" if validation.get("available") else "DATA_NA")
+
+    if av_status == "FOUND":
         return Score(90, "OK", [], {
-            "jc_validation": validation,
-            "existing_jo_reports": existing,
             "alphaforge_validation_status": "FOUND",
-            "alphaforge_validation_path_checked": checked,
-            "alphaforge_validation_path_found": existing,
-            "alphaforge_validation_reason": "JC API linked",
+            "alphaforge_validation_source_type": source_type,
+            "alphaforge_validation_path_found": path_found_list,
+            "alphaforge_validation_path_checked": paths_checked,
+            "alphaforge_validation_reason": validation.get("reason") or "AlphaForge 검증 리포트 로드 성공",
+        })
+
+    if av_status == "PATH_MISMATCH":
+        notes = ["JO 리포트는 존재하지만 JC 연동 경로 mismatch 가능"]
+        return Score(20, "PATH_MISMATCH", notes, {
+            "alphaforge_validation_status": "PATH_MISMATCH",
+            "alphaforge_validation_source_type": source_type,
+            "alphaforge_validation_path_found": path_found_list,
+            "alphaforge_validation_path_checked": paths_checked,
+            "alphaforge_validation_reason": validation.get("reason") or "file exists but not linked",
+        })
+
+    if av_status == "READ_ERROR":
+        notes = [validation.get("reason") or "AlphaForge 검증 파일 읽기 오류"]
+        return Score(30, "READ_ERROR", notes, {
+            "alphaforge_validation_status": "READ_ERROR",
+            "alphaforge_validation_source_type": source_type,
+            "alphaforge_validation_path_found": path_found_list,
+            "alphaforge_validation_path_checked": paths_checked,
+            "alphaforge_validation_reason": validation.get("reason") or "READ_ERROR",
+        })
+
+    # DATA_NA — but also check ALPHAFORGE_VALIDATION_PATHS for file-existence
+    # This preserves backward-compat with tests that monkeypatch ALPHAFORGE_VALIDATION_PATHS
+    existing_legacy = [str(p) for p in ALPHAFORGE_VALIDATION_PATHS if p.exists()]
+    if existing_legacy and not path_found_list:
+        # Files exist on disk but were not loaded (PATH_MISMATCH or not yet parsed)
+        notes = [validation.get("reason") or "JO 리포트는 존재하지만 JC 연동 경로 mismatch 가능"]
+        notes.append("JO 리포트는 존재하지만 JC 연동 경로 mismatch 가능")
+        return Score(20, "PATH_MISMATCH", notes, {
+            "alphaforge_validation_status": "PATH_MISMATCH",
+            "alphaforge_validation_source_type": source_type,
+            "alphaforge_validation_path_found": existing_legacy,
+            "alphaforge_validation_path_checked": paths_checked or [str(p) for p in ALPHAFORGE_VALIDATION_PATHS],
+            "alphaforge_validation_reason": validation.get("reason") or "file exists but not linked",
         })
     notes = [validation.get("reason") or "AlphaForge Validation 리포트 없음"]
-    score = 45 if not existing else 20
-    status = "DATA_NA" if not existing else "PATH_MISMATCH"
-    reason = "candidate files not found" if not existing else "file exists but JC validation API is not linked to it"
-    if existing:
-        notes.append("JO 리포트는 존재하지만 JC 연동 경로 mismatch 가능")
-    return Score(score, status, notes, {
-        "jc_validation": validation,
-        "existing_jo_reports": existing,
-        "alphaforge_validation_status": status,
-        "alphaforge_validation_path_checked": checked,
-        "alphaforge_validation_path_found": existing,
-        "alphaforge_validation_reason": reason,
+    return Score(45, "DATA_NA", notes, {
+        "alphaforge_validation_status": "DATA_NA",
+        "alphaforge_validation_source_type": "DATA_NA",
+        "alphaforge_validation_path_found": path_found_list,
+        "alphaforge_validation_path_checked": paths_checked,
+        "alphaforge_validation_reason": validation.get("reason") or "candidate files not found",
     })
 
 
@@ -543,24 +602,43 @@ def _find_anomalies(context: dict[str, Any], scores: dict[str, Score], guard_dia
     return anomalies
 
 
-def _apply_caps(raw_score: float, context: dict[str, Any], scores: dict[str, Score]) -> tuple[float, list[str]]:
+def _apply_caps(
+    raw_score: float,
+    context: dict[str, Any],
+    scores: dict[str, Score],
+    score_data_mode: str = "API_CONNECTED",
+) -> tuple[float, list[str]]:
     caps: list[tuple[int, str]] = []
     strength = scores["realtime_strength_score"].details
     strength_cov = _to_float(strength.get("coverage_pct"))
-    if strength.get("realtime_strength_evaluable") and strength_cov == 0 and _to_int(strength.get("total")) > 0:
-        caps.append((75, "체결강도 커버리지 0%"))
-    elif strength.get("realtime_strength_evaluable") and strength_cov < 50:
-        caps.append((80, "체결강도 커버리지 < 50%"))
+    # Only cap strength when LIVE and evaluable — not during CLOSED_REVIEW
+    if strength.get("realtime_strength_evaluable"):
+        if strength_cov == 0 and _to_int(strength.get("total")) > 0:
+            caps.append((75, "체결강도 커버리지 0%"))
+        elif strength_cov < 50 and _to_int(strength.get("total")) > 0:
+            caps.append((80, "체결강도 커버리지 < 50%"))
     guard = context.get("guard_status") or {}
     if guard.get("is_stale") or guard.get("overall_status") == "STALE":
         caps.append((78, "JC Guard STALE"))
     if "401" in str(scores["ops_reliability_score"].details.get("telegram_last_error_reason", "")):
         caps.append((78, "Telegram 401 unauthorized"))
-    forward_n = scores["forward_test_score"].details.get("sample_count", 0)
-    if _to_int(forward_n) < 100:
+    # Forward Test cap: distinguish API_UNAVAILABLE from real n=0
+    ft_details = scores["forward_test_score"].details
+    ft_status = ft_details.get("forward_test_status") or ft_details.get("status") or "DATA_INSUFFICIENT"
+    forward_n = _to_int(ft_details.get("sample_count", 0))
+    if ft_status == "API_UNAVAILABLE":
+        caps.append((85, f"Forward Test API_UNAVAILABLE 또는 DATA_INSUFFICIENT"))
+    elif ft_status == "DATA_INSUFFICIENT" or (ft_status == "OK" and forward_n < 100):
         caps.append((85, f"Forward Test 표본 부족 n={forward_n}"))
-    if scores["alphaforge_validation_link_score"].status != "OK":
-        caps.append((88, "AlphaForge Validation 미연동 또는 DATA_NA"))
+    # AlphaForge Validation cap: use precise status
+    av_status = scores["alphaforge_validation_link_score"].details.get("alphaforge_validation_status", "DATA_NA")
+    if av_status == "DATA_NA":
+        caps.append((88, "AlphaForge Validation DATA_NA"))
+    elif av_status == "PATH_MISMATCH":
+        caps.append((88, "AlphaForge Validation PATH_MISMATCH"))
+    elif av_status == "READ_ERROR":
+        caps.append((88, "AlphaForge Validation READ_ERROR"))
+    # FOUND → no cap
     quote_details = scores["quote_coverage_score"].details
     quote_cov = _score_from_ratio(_to_int(quote_details.get("success")), _to_int(quote_details.get("total")))
     if quote_details.get("total") and quote_cov < 90:
@@ -582,6 +660,7 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
     decision = context.get("decision_summary") or {}
     forward = context.get("forward_test_summary") or decision.get("forward_test_summary") or {}
     score_context = _score_context(context)
+    score_data_mode = context.get("score_data_mode", "API_CONNECTED")
     scores = {
         "jo_handoff_score": _score_jo_handoff(themes, now),
         "quote_coverage_score": _score_quote_coverage(themes),
@@ -590,7 +669,7 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
         "market_gate_score": _score_market_gate(decision),
         "decision_consistency_score": _score_decision_consistency(decision),
         "setup_explainability_score": _score_setup_explainability(decision),
-        "forward_test_score": _score_forward(forward),
+        "forward_test_score": _score_forward(forward, score_data_mode),
         "ops_reliability_score": _score_ops(context.get("guard_status") or {}, context.get("telegram_status") or {}),
         "alphaforge_validation_link_score": _score_alphaforge_validation(context.get("alphaforge_validation") or {}),
     }
@@ -598,7 +677,7 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
     if not scores["realtime_strength_score"].details.get("realtime_strength_evaluable", True):
         active_weights.pop("realtime_strength_score", None)
     raw = sum(scores[key].value * weight for key, weight in active_weights.items()) / sum(active_weights.values())
-    capped, cap_reasons = _apply_caps(raw, context, scores)
+    capped, cap_reasons = _apply_caps(raw, context, scores, score_data_mode)
     confidence = "MEDIUM"
     if capped < 70 or len(cap_reasons) >= 3:
         confidence = "LOW"
@@ -609,12 +688,25 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
     guard_diag = _diagnose_guard_timestamp(context.get("guard_status") or {}, now)
     anomalies = _find_anomalies(context, scores, guard_diag)
     realtime_details = scores["realtime_strength_score"].details
+    ft_details = scores["forward_test_score"].details
+    av_details = scores["alphaforge_validation_link_score"].details
     return {
         "generated_at": _now_iso(),
         "score_context": score_context,
+        "score_data_mode": score_data_mode,
         "overall_jc_practicality_score": round(capped, 1),
         "raw_overall_score": round(raw, 1),
         "confidence": confidence,
+        # ── Top-level flat fields required by spec ─────────────────────────────
+        "alphaforge_validation_status": av_details.get("alphaforge_validation_status", "DATA_NA"),
+        "alphaforge_validation_link_score": round(scores["alphaforge_validation_link_score"].value, 1),
+        "alphaforge_validation_source_type": av_details.get("alphaforge_validation_source_type", "DATA_NA"),
+        "alphaforge_validation_path_found": av_details.get("alphaforge_validation_path_found", []),
+        "alphaforge_validation_reason": av_details.get("alphaforge_validation_reason", ""),
+        "forward_test_status": ft_details.get("forward_test_status") or ft_details.get("status", "DATA_INSUFFICIENT"),
+        "forward_test_sample_n": _to_int(ft_details.get("forward_test_sample_n") or ft_details.get("sample_count", 0)),
+        "forward_test_reason": ft_details.get("forward_test_reason", ""),
+        # ── Sub-scores ────────────────────────────────────────────────────────
         "scores": {
             key: {
                 "score": None if key == "realtime_strength_score" and not score.details.get("realtime_strength_evaluable", True) else round(score.value, 1),
@@ -629,7 +721,7 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
         "cap_reasons": cap_reasons,
         "anomalies": anomalies,
         "guard_timestamp_diagnostics": guard_diag,
-        "alphaforge_validation_diagnostics": scores["alphaforge_validation_link_score"].details,
+        "alphaforge_validation_diagnostics": av_details,
         "telegram_diagnostics": {
             "telegram_status": scores["ops_reliability_score"].details.get("telegram_status"),
             "last_error_status": scores["ops_reliability_score"].details.get("telegram_last_error_reason"),
@@ -657,6 +749,8 @@ def calculate_scorecard(context: dict[str, Any], now: datetime | None = None) ->
 def collect_context(fetch_live: bool = True) -> dict[str, Any]:
     source_status: dict[str, str] = {}
     context: dict[str, Any] = {"source_status": source_status}
+    api_reachable_keys: set[str] = set()
+
     if fetch_live:
         for key, path in (
             ("themes", "/api/themes?sort=default"),
@@ -668,6 +762,20 @@ def collect_context(fetch_live: bool = True) -> dict[str, Any]:
             data, status = _http_json(path)
             context[key] = data
             source_status[key] = f"api:{status}"
+            if data and "DATA_INSUFFICIENT" not in status:
+                api_reachable_keys.add(key)
+
+    # Determine score_data_mode
+    core_api_keys = {"themes", "decision_summary"}
+    if not fetch_live:
+        score_data_mode = "OFFLINE_FALLBACK"
+    elif core_api_keys.issubset(api_reachable_keys):
+        score_data_mode = "API_CONNECTED"
+    elif api_reachable_keys:
+        score_data_mode = "PARTIAL_FALLBACK"
+    else:
+        score_data_mode = "OFFLINE_FALLBACK"
+    context["score_data_mode"] = score_data_mode
 
     if not context.get("themes"):
         context["themes"] = {}
@@ -677,10 +785,25 @@ def collect_context(fetch_live: bool = True) -> dict[str, Any]:
         context["guard_status"] = _read_json(ROOT / "data" / "reports" / "guard" / "latest_health.json", {})
     if not context.get("telegram_status"):
         context["telegram_status"] = _read_json(ROOT / "data" / "runtime" / "telegram_alert_state.json", {})
-    if not context.get("alphaforge_validation"):
-        context["alphaforge_validation"] = {"available": False, "reason": "AlphaForge 검증 리포트 없음"}
+
+    # AlphaForge Validation: always try shared file loader as fallback
+    av_data = context.get("alphaforge_validation") or {}
+    if not av_data.get("available") and not av_data.get("status") == "FOUND":
+        # Try shared loader directly from files
+        av_from_file = _load_av()
+        if av_from_file.get("status") == "FOUND":
+            context["alphaforge_validation"] = av_from_file
+            source_status["alphaforge_validation"] = f"file:{av_from_file.get('source_type', 'FILE')}"
+        elif not av_data:
+            context["alphaforge_validation"] = av_from_file  # keep DATA_NA with proper fields
+            source_status.setdefault("alphaforge_validation", f"file:DATA_NA")
+
     if not context.get("forward_test_summary"):
-        context["forward_test_summary"] = (context.get("themes") or {}).get("forward_test_summary") or (context.get("decision_summary") or {}).get("forward_test_summary") or {}
+        context["forward_test_summary"] = (
+            (context.get("themes") or {}).get("forward_test_summary")
+            or (context.get("decision_summary") or {}).get("forward_test_summary")
+            or {}
+        )
     return context
 
 
@@ -689,19 +812,34 @@ def render_markdown(report: dict[str, Any]) -> str:
     strength_score = scores["realtime_strength_score"]["score"]
     strength_score_text = "N/A" if strength_score is None else str(strength_score)
     context_text = report.get("score_context") or "UNKNOWN"
+    score_data_mode = report.get("score_data_mode", "API_CONNECTED")
     context_note = (
         "현재 점수는 폐장 후 점검 점수이며, 장중 실시간 매수판단 성능은 아직 평가 보류입니다."
         if context_text == "CLOSED_REVIEW"
         else "현재 점수는 장중 실시간 매수판단 점수입니다."
     )
+    data_mode_note = (
+        "현재 점수는 JC 서버 API 실시간 데이터를 기반으로 합니다."
+        if score_data_mode == "API_CONNECTED"
+        else "현재 점수는 제한된 fallback 점검 결과입니다. JC 서버가 실행 중이지 않아 일부 데이터는 미수집 상태입니다."
+        if score_data_mode == "OFFLINE_FALLBACK"
+        else "현재 점수는 일부 API 연결 성공 + fallback 혼합 기반입니다."
+    )
     guard_diag = report.get("guard_timestamp_diagnostics") or {}
     av_diag = report.get("alphaforge_validation_diagnostics") or {}
     tg_diag = report.get("telegram_diagnostics") or {}
+    av_status = report.get("alphaforge_validation_status") or av_diag.get("alphaforge_validation_status") or "DATA_NA"
+    av_score = report.get("alphaforge_validation_link_score")
+    ft_status = report.get("forward_test_status", "DATA_INSUFFICIENT")
+    ft_n = report.get("forward_test_sample_n", 0)
+    ft_reason = report.get("forward_test_reason", "")
     lines = [
         "# JC Practicality & Accuracy Scorecard v1",
         "",
         "## 요약",
         f"- 생성 시각: {report['generated_at']}",
+        f"- 데이터 모드: **{score_data_mode}**",
+        f"- {data_mode_note}",
         f"- 현재 점수 유형: **{context_text}**",
         f"- {context_note}",
         f"- 현재 JC 실전성 점수: **{report['overall_jc_practicality_score']} / 100**",
@@ -770,13 +908,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         "- 민감 환경값은 리포트에 포함하지 않습니다.",
         "",
         "## AlphaForge Validation 연동 상태",
-        f"- alphaforge_validation_link_score: {scores['alphaforge_validation_link_score']['score']}",
+        f"- alphaforge_validation_status: **{av_status}**",
+        f"- alphaforge_validation_link_score: {av_score}",
+        f"- alphaforge_validation_source_type: {report.get('alphaforge_validation_source_type', 'DATA_NA')}",
+        f"- alphaforge_validation_path_found: `{json.dumps(report.get('alphaforge_validation_path_found', []), ensure_ascii=False)}`",
         f"- notes: {', '.join(scores['alphaforge_validation_link_score']['notes']) or '-'}",
         "",
         "## AlphaForge Validation 경로 진단",
-        f"- alphaforge_validation_status: {av_diag.get('alphaforge_validation_status')}",
-        f"- alphaforge_validation_path_found: `{json.dumps(av_diag.get('alphaforge_validation_path_found', []), ensure_ascii=False)}`",
-        f"- alphaforge_validation_reason: {av_diag.get('alphaforge_validation_reason')}",
+        f"- alphaforge_validation_reason: {report.get('alphaforge_validation_reason') or av_diag.get('alphaforge_validation_reason')}",
+        "",
+        "## Forward Test 상태",
+        f"- forward_test_status: **{ft_status}**",
+        f"- forward_test_sample_n: {ft_n}",
+        f"- forward_test_reason: {ft_reason}",
         "",
         "## 90점 도달 제한 사유",
     ]
