@@ -39,6 +39,9 @@ class StockState:
     supply_recency: str = "UNKNOWN"
     supply_date: str = ""
     supply_error: str = ""
+    quote_source: str = "MISSING"
+    quote_updated_at: str = ""
+    quote_error: str = ""
     # Volume surge detection (5-min rolling window)
     volume_history: deque = field(default_factory=lambda: deque(maxlen=5))
     surge_active: bool = False

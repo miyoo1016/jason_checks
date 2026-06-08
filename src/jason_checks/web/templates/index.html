@@ -583,6 +583,9 @@
                                             <span class="mono font-black text-[11px] ml-2"
                                                   :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
                                                   x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') + '원' : '-'"></span>
+                                            <span x-show="stock.quote_source && stock.quote_source !== 'LIVE'" class="text-[8px] font-bold px-1 py-0.5 rounded tracking-tight"
+                                                  :class="stock.quote_source === 'MISSING' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'"
+                                                  x-text="stock.quote_source === 'MISSING' ? 'MISSING' : 'STALE'"></span>
                                             <span class="mono font-black text-[10px]"
                                                   :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
                                                   x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></span>
@@ -733,6 +736,9 @@
                                                         <span class="text-[10px] font-black"
                                                               :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
                                                               x-text="isLiveStock(stock) ? Number(stock.price).toLocaleString('ko-KR') : '-'"></span>
+                                                        <span x-show="stock.quote_source && stock.quote_source !== 'LIVE'" class="text-[8px] font-bold px-1 py-0.5 rounded tracking-tight mt-0.5 inline-block"
+                                                              :class="stock.quote_source === 'MISSING' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'"
+                                                              x-text="stock.quote_source === 'MISSING' ? 'MISSING' : 'STALE'"></span>
                                                         <span class="text-[9px] font-black"
                                                               :class="{ 'up': stock.change_pct > 0, 'down': stock.change_pct < 0, 'text-gray-400': !isLiveStock(stock) }"
                                                               x-text="isLiveStock(stock) ? fmtPct(stock.change_pct) : '-'"></span>

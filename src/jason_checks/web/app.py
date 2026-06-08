@@ -311,6 +311,9 @@ def _apply_price_snapshot(code: str, price_data: dict | None) -> bool:
         "cumulative_volume": int(price_data.get("volume") or 0),
         "cumulative_trading_value": int(price_data.get("trading_value") or 0),
         "market": price_data.get("market", "J"),
+        "quote_source": "LIVE",
+        "quote_updated_at": datetime.now().isoformat(),
+        "quote_error": "",
     }
     strength_raw = price_data.get("strength")
     strength = float(strength_raw or 0)
@@ -318,6 +321,26 @@ def _apply_price_snapshot(code: str, price_data: dict | None) -> bool:
         update_data["execution_strength"] = strength
     app_state.update_stock(code, **update_data)
     return True
+
+
+def _mark_quote_failure(code: str, reason: str) -> str:
+    code = _normalize_symbol(code)
+    stock = app_state.stocks.get(code)
+    if stock and float(getattr(stock, "price", 0) or 0) > 0:
+        stock.quote_source = "STALE_PREVIOUS"
+        stock.quote_error = reason[:160]
+        return "STALE_PREVIOUS"
+    return "MISSING"
+
+
+def _quote_age_seconds(stock) -> int | None:
+    ts = getattr(stock, "quote_updated_at", "") or ""
+    if not ts:
+        return None
+    try:
+        return max(0, int((datetime.now() - datetime.fromisoformat(ts)).total_seconds()))
+    except Exception:
+        return None
 
 
 def _run_dashboard_decision_engine_cached(
@@ -369,23 +392,47 @@ async def _theme_quote_polling_loop(app):
 
             hydrated = 0
             missing_codes: list[str] = []
+            stale_codes: list[str] = []
             last_exception = ""
             stuck_warned = False
             symbol_names = _watch_symbol_names(app)
             started_at = datetime.now()
             estimated_sec = max(30, min(90, round(len(symbols) * 0.7)))
+            last_good_count = int((getattr(app, "quote_polling_status", {}) or {}).get("last_good_quote_count") or 0)
+            last_full_success_at = (getattr(app, "quote_polling_status", {}) or {}).get("last_full_quote_success_at", "")
+
+            last_quote_total = (getattr(app, "quote_polling_status", {}) or {}).get("quote_total", len(symbols))
+            last_quote_success = (getattr(app, "quote_polling_status", {}) or {}).get("quote_success", 0)
+            last_quote_failed = (getattr(app, "quote_polling_status", {}) or {}).get("quote_failed", 0)
+            last_missing = (getattr(app, "quote_polling_status", {}) or {}).get("missing", 0)
+            last_stale = (getattr(app, "quote_polling_status", {}) or {}).get("stale_quote_count", 0)
+            last_fallback = (getattr(app, "quote_polling_status", {}) or {}).get("fallback_quote_count", 0)
+
             app.quote_polling_status = {
-                "total": len(symbols),
+                "total": last_quote_total,
+                "quote_total": last_quote_total,
                 "checked": 0,
-                "success": 0,
-                "missing": 0,
+                "success": last_quote_success,
+                "quote_success": last_quote_success,
+                "quote_failed": last_quote_failed,
+                "missing": last_missing,
+                "stale_quote_count": last_stale,
+                "fallback_quote_count": last_fallback,
+                "current_run_checked": 0,
+                "current_run_success": 0,
                 "in_progress": True,
+                "quote_polling_in_progress": True,
                 "started_at": started_at.isoformat(),
+                "quote_poll_started_at": started_at.isoformat(),
                 "updated_at": started_at.isoformat(),
                 "completed_at": "",
+                "quote_poll_finished_at": "",
                 "duration_sec": getattr(app, "last_quote_polling_duration_sec", 0),
                 "estimated_sec": estimated_sec,
                 "missing_symbols": [],
+                "quote_failed_symbols_sample": [],
+                "last_full_quote_success_at": last_full_success_at,
+                "last_good_quote_count": last_good_count,
                 "last_exception": "",
             }
             logger.info("theme_quote_polling_start", count=len(symbols), market=CURRENT_MARKET)
@@ -395,16 +442,32 @@ async def _theme_quote_polling_loop(app):
                     if _apply_price_snapshot(code, data):
                         hydrated += 1
                     else:
-                        missing_codes.append(code)
+                        source = _mark_quote_failure(code, "empty_or_invalid_quote")
+                        if source == "STALE_PREVIOUS":
+                            stale_codes.append(code)
+                        else:
+                            missing_codes.append(code)
                 except Exception as e:
                     last_exception = f"{code}: {type(e).__name__}: {e}"
-                    missing_codes.append(code)
-                    logger.warning("theme_quote_symbol_error", code=code, error=str(e), error_type=type(e).__name__)
+                    source = _mark_quote_failure(code, f"{type(e).__name__}: {e}")
+                    if source == "STALE_PREVIOUS":
+                        stale_codes.append(code)
+                    else:
+                        missing_codes.append(code)
                 duration_live = round((datetime.now() - started_at).total_seconds(), 1)
+                failed_count = len(missing_codes) + len(stale_codes)
+                failed_sample = [
+                    {"code": c, "name": symbol_names.get(c, ""), "quote_source": "MISSING"}
+                    for c in missing_codes[:10]
+                ]
+                if len(failed_sample) < 10:
+                    failed_sample.extend([
+                        {"code": c, "name": symbol_names.get(c, ""), "quote_source": "STALE_PREVIOUS"}
+                        for c in stale_codes[:10 - len(failed_sample)]
+                    ])
                 app.quote_polling_status.update({
-                    "checked": hydrated + len(missing_codes),
-                    "success": hydrated,
-                    "missing": len(missing_codes),
+                    "current_run_checked": hydrated + failed_count,
+                    "current_run_success": hydrated,
                     "updated_at": datetime.now().isoformat(),
                     "duration_sec": duration_live,
                     "last_exception": last_exception,
@@ -415,25 +478,51 @@ async def _theme_quote_polling_loop(app):
                         "theme_quote_polling_slow",
                         elapsed_sec=duration_live,
                         quote_success=hydrated,
+                        quote_failed=failed_count,
                         price_missing=len(missing_codes),
-                        missing_symbols=[
+                        stale_quotes=len(stale_codes),
+                        failed_symbols_sample=[
                             {"code": c, "name": symbol_names.get(c, "")}
-                            for c in missing_codes[:20]
+                            for c in (missing_codes + stale_codes)[:10]
                         ],
                         last_exception=last_exception,
                     )
             missing_preview = [
-                {"code": code, "name": symbol_names.get(code, "")}
-                for code in missing_codes[:20]
+                {"code": code, "name": symbol_names.get(code, ""), "quote_source": "MISSING"}
+                for code in missing_codes[:10]
             ]
+            if len(missing_preview) < 10:
+                missing_preview.extend([
+                    {"code": code, "name": symbol_names.get(code, ""), "quote_source": "STALE_PREVIOUS"}
+                    for code in stale_codes[:10 - len(missing_preview)]
+                ])
             duration_sec = round((datetime.now() - started_at).total_seconds(), 1)
             app.last_quote_polling_duration_sec = duration_sec
+            full_success = hydrated == len(symbols)
+            if hydrated > 0:
+                app.last_good_quote_count = hydrated
+            if full_success:
+                app.last_full_quote_success_at = datetime.now().isoformat()
             app.quote_polling_status.update({
+                "total": len(symbols),
+                "quote_total": len(symbols),
+                "checked": hydrated + len(missing_codes) + len(stale_codes),
+                "success": hydrated,
+                "quote_success": hydrated,
+                "quote_failed": len(missing_codes) + len(stale_codes),
+                "missing": len(missing_codes),
+                "stale_quote_count": len(stale_codes),
+                "fallback_quote_count": len(stale_codes),
                 "in_progress": False,
+                "quote_polling_in_progress": False,
                 "completed_at": datetime.now().isoformat(),
+                "quote_poll_finished_at": datetime.now().isoformat(),
                 "duration_sec": duration_sec,
                 "estimated_sec": duration_sec,
                 "missing_symbols": missing_preview,
+                "quote_failed_symbols_sample": missing_preview,
+                "last_good_quote_count": getattr(app, "last_good_quote_count", hydrated),
+                "last_full_quote_success_at": getattr(app, "last_full_quote_success_at", last_full_success_at),
                 "last_exception": last_exception,
             })
             if hydrated < 80:
@@ -441,22 +530,27 @@ async def _theme_quote_polling_loop(app):
                     "theme_quote_polling_low_success",
                     elapsed_sec=duration_sec,
                     quote_success=hydrated,
+                    quote_failed=len(missing_codes) + len(stale_codes),
                     price_missing=len(missing_codes),
-                    missing_symbols=missing_preview,
+                    stale_quotes=len(stale_codes),
+                    failed_symbols_sample=missing_preview,
                     last_exception=last_exception,
                 )
             logger.info(
                 "theme_quote_polling_done",
                 watch_symbols=len(symbols),
                 quote_success=hydrated,
+                quote_failed=len(missing_codes) + len(stale_codes),
                 price_missing=len(missing_codes),
-                missing_symbols=missing_preview,
+                stale_quotes=len(stale_codes),
+                failed_symbols_sample=missing_preview,
             )
         except Exception as e:
             logger.warning("theme_quote_polling_error", error=str(e))
             status = dict(getattr(app, "quote_polling_status", {}) or {})
             status.update({
                 "in_progress": False,
+                "quote_polling_in_progress": False,
                 "last_exception": str(e),
                 "updated_at": datetime.now().isoformat(),
             })
