@@ -447,18 +447,28 @@ async def fetch_naver_index(code: str) -> dict:
         resp.raise_for_status()
         data = resp.json()
 
-        def _parse_num(val):
-            if not val:
-                return 0.0
-            val_str = str(val).replace(",", "").replace("%", "").strip()
-            try:
-                return float(val_str)
-            except Exception:
-                return 0.0
+        def _get_first_valid(fields: list[str]) -> float:
+            for f in fields:
+                val = data.get(f)
+                if isinstance(val, dict):
+                    val = val.get("value") or val.get("price") or val.get("diff") or val.get("amount")
+                if val is not None and str(val).strip() != "":
+                    try:
+                        val_str = str(val).replace(",", "").replace("%", "").strip()
+                        if val_str.startswith("+"):
+                            val_str = val_str[1:]
+                        return float(val_str)
+                    except Exception:
+                        pass
+            return 0.0
 
-        price = _parse_num(data.get("closePrice") or data.get("currentPrice") or 0)
-        chg_val = _parse_num(data.get("compareToPreviousClosePrice") or data.get("compareToPreviousPrice") or 0)
-        chg_pct = _parse_num(data.get("fluctuationsRatio") or data.get("changeRate") or 0)
+        price = _get_first_valid(["closePrice", "currentPrice", "localTradedAtPrice", "now", "price", "tradePrice"])
+        chg_val = _get_first_valid(["compareToPreviousClosePrice", "compareToPreviousPrice", "changePrice", "fluctuations", "priceChange"])
+        chg_pct = _get_first_valid(["fluctuationsRatio", "changeRate", "compareToPreviousClosePriceRate", "compareToPreviousPriceRate", "rate", "change_pct"])
+
+        import math
+        if price <= 0 or math.isnan(price):
+            raise ValueError(f"Invalid parsed price: {price}")
 
         sign_code = str(data.get("compareToPreviousPrice", {}).get("code", "") if isinstance(data.get("compareToPreviousPrice"), dict) else data.get("compareToPreviousPriceCode", ""))
 
@@ -538,8 +548,8 @@ async def fetch_market_indices(market: str = "KR") -> dict:
                     chg_pct = float(out.get("rate", 0) or 0)
                     chg_val = float(out.get("diff", 0) or 0)
 
-                # If KOSPI price is dummy (exceeds 6000)
-                if market == "KR" and code == "0001" and price > 6000:
+                # If KOSPI price is dummy (exceeds 20000)
+                if market == "KR" and code == "0001" and price > 20000:
                     source = "dummy"
 
                 source_detail = source
@@ -566,14 +576,14 @@ async def fetch_market_indices(market: str = "KR") -> dict:
 
                 if source != "UNAVAILABLE":
                     if market == "KR":
-                        if code == "0001" and not (1000 <= price <= 6000):
+                        if code == "0001" and not (500 <= price <= 20000):
                             is_sane = False
-                            sanity_warnings.append(f"KOSPI price {price} out of range (1000~6000)")
-                        if code == "1001" and not (300 <= price <= 2000):
+                            sanity_warnings.append(f"KOSPI price {price} out of range (500~20000)")
+                        if code == "1001" and not (200 <= price <= 10000):
                             is_sane = False
-                            sanity_warnings.append(f"KOSDAQ price {price} out of range (300~2000)")
+                            sanity_warnings.append(f"KOSDAQ price {price} out of range (200~10000)")
 
-                    if abs(chg_pct) > 15.0:
+                    if abs(chg_pct) > 25.0:
                         is_sane = False
                         sanity_warnings.append(f"Change pct {chg_pct}% too extreme")
                 else:
