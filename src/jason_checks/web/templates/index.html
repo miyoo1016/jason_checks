@@ -227,8 +227,13 @@
                             <div class="text-gray-500 normal-case" x-text="`마지막 갱신: ${formatClock(quotePolling.updated_at || quotePolling.completed_at)}`"></div>
                             <div class="text-gray-500 normal-case" x-text="quoteEtaText()"></div>
                             <div class="text-gray-500 normal-case" x-text="strengthSupplyLoadText()"></div>
-                            <div x-show="alphaforgeCandidatesLoaded > 0" class="text-blue-600 normal-case"
-                                 x-text="`AlphaForge 후보 로드: ${alphaforgeCandidatesLoaded}개 / ${alphaforgeCandidatesGeneratedAt || '-'}`"></div>
+                            <div x-show="alphaforgeCandidatesLoaded > 0" class="flex items-center gap-2">
+                                <div class="text-blue-600 normal-case" x-text="`AlphaForge 후보 로드: ${alphaforgeCandidatesLoaded}개 / ${alphaforgeCandidatesGeneratedAt || '-'}`"></div>
+                                <div x-show="alphaforgeReloadCount > 0" class="text-[10px] text-gray-500 font-bold bg-gray-100 px-1.5 py-0.5 rounded" x-text="`자동갱신: ${alphaforgeReloadCount}회`"></div>
+                                <div x-show="alphaforgeLastReloadError" class="text-[10px] text-red-600 font-bold flex items-center gap-1" :title="alphaforgeLastReloadError">
+                                    <span>⚠️</span><span x-text="`갱신 실패 (${alphaforgeLastReloadError.substring(0,20)})`"></span>
+                                </div>
+                            </div>
                         </div>
                         <!-- Sort Toggle -->
                         <div class="flex gap-2">

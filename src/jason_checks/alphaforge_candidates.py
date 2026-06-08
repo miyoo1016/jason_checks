@@ -489,8 +489,6 @@ def _normalize_loaded_candidates(raw_candidates: list[Any]) -> tuple[list[dict[s
             "short_reasons": dual.get("short_reasons", "-"),
             "position_reasons": dual.get("position_reasons", "-"),
         })
-        if len(loaded) >= 5:
-            break
     return loaded, skipped_reason_counts
 
 

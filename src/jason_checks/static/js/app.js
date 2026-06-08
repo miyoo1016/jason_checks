@@ -61,6 +61,8 @@ function timaApp() {
         alphaforgeCandidatesLoaded: 0,
         alphaforgeCandidatesGeneratedAt: '',
         alphaforgeCandidatesPublishedAt: '',
+        alphaforgeReloadCount: 0,
+        alphaforgeLastReloadError: '',
         alphaforgePicksData: [],
         themeLoadStatus: 'ok',
         themeLoadReason: '',
@@ -2363,6 +2365,8 @@ ${markers}\
                 this.alphaforgeCandidatesLoaded = data.alphaforge_candidates_loaded || 0;
                 this.alphaforgeCandidatesGeneratedAt = data.alphaforge_candidates_generated_at || '';
                 this.alphaforgeCandidatesPublishedAt = data.alphaforge_candidates_published_at || '';
+                this.alphaforgeReloadCount = data.alphaforge_reload_count || 0;
+                this.alphaforgeLastReloadError = data.alphaforge_last_reload_error || '';
                 this.alphaforgePicksData = Array.isArray(data.alphaforge_picks) ? data.alphaforge_picks : [];
                 this.themeLoadStatus = data.theme_load_status || 'ok';
                 this.themeLoadReason = data.theme_load_reason || '';

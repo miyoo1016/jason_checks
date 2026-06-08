@@ -1003,29 +1003,20 @@ def create_app() -> FastAPI:
             app.theme_data = data.get("themes", {})
             app.theme_load_status = "ok"
             app.theme_load_reason = ""
-            app.alphaforge_candidates_loaded = 0
-            app.alphaforge_candidates_path = ""
-            app.alphaforge_candidates_generated_at = ""
-            app.alphaforge_candidates_source = ""
-            app.alphaforge_candidates_mode = ""
-            app.alphaforge_candidates_published_at = ""
-            app.alphaforge_candidates_is_stale = False
-            app.alphaforge_candidates_stale_age_hours = -1.0
-            app.alphaforge_candidates_fallback_warning = ""
             app.alphaforge_theme_data = {}
+            app.alphaforge_source_path = ""
+            app.alphaforge_file_exists = False
+            app.alphaforge_file_mtime = ""
+            app.alphaforge_file_age_seconds = 0
+            app.alphaforge_loaded_at = ""
+            app.alphaforge_candidates_loaded = 0
+            app.alphaforge_reload_count = 0
+            app.alphaforge_last_reload_error = ""
+            app.alphaforge_is_stale = False
+            app.alphaforge_stale_reason = ""
+
             if market == "KR":
-                alphaforge_candidates, alphaforge_meta = load_alphaforge_candidates_with_meta()
-                app.alphaforge_candidates_path = alphaforge_meta.get("path", "")
-                app.alphaforge_candidates_generated_at = alphaforge_meta.get("generated_at", "")
-                app.alphaforge_candidates_source = alphaforge_meta.get("source", "")
-                app.alphaforge_candidates_mode = alphaforge_meta.get("mode", "")
-                app.alphaforge_candidates_published_at = alphaforge_meta.get("published_at", "")
-                app.alphaforge_candidates_is_stale = alphaforge_meta.get("is_stale", False)
-                app.alphaforge_candidates_stale_age_hours = alphaforge_meta.get("stale_age_hours", -1.0)
-                app.alphaforge_candidates_fallback_warning = alphaforge_meta.get("fallback_warning", "")
-                if alphaforge_candidates:
-                    app.alphaforge_theme_data = build_alphaforge_theme(alphaforge_candidates).get("AlphaForge", {})
-                    app.alphaforge_candidates_loaded = len(alphaforge_candidates)
+                check_and_reload_alphaforge(app)
             app.stock_codes = get_all_stock_codes(_theme_data_for_subscription(app))
             app.theme_symbols = get_all_stock_codes(app.theme_data)
             app.watch_symbols = _build_watch_symbols(app)
@@ -1301,8 +1292,159 @@ def create_app() -> FastAPI:
     async def save_signal_journal_endpoint():
         return save_signal_journal(getattr(app, "theme_data", {}), market=CURRENT_MARKET)
 
+    def check_and_reload_alphaforge(app):
+        if getattr(app, "market", CURRENT_MARKET) != "KR":
+            return
+        import os
+        from jason_checks.alphaforge_candidates import get_candidate_path_priority, get_dual_horizon_path, load_alphaforge_candidates_with_meta, build_alphaforge_theme
+
+        dual_path = get_dual_horizon_path()
+        dual_mtime = os.path.getmtime(dual_path) if dual_path.exists() else 0
+        dual_size = os.path.getsize(dual_path) if dual_path.exists() else 0
+
+        paths = get_candidate_path_priority()
+        active_path = None
+        for p in paths:
+            if p and p.exists():
+                active_path = p
+                break
+
+        cand_mtime = os.path.getmtime(active_path) if active_path else 0
+        cand_size = os.path.getsize(active_path) if active_path else 0
+
+        if not hasattr(app, "_alphaforge_cand_last_mtime"):
+            app._alphaforge_cand_last_mtime = cand_mtime
+            app._alphaforge_dual_last_mtime = dual_mtime
+            app._alphaforge_cand_last_size = cand_size
+            app._alphaforge_dual_last_size = dual_size
+            force_reload = True
+        else:
+            force_reload = False
+
+        if force_reload or cand_mtime != app._alphaforge_cand_last_mtime or cand_size != app._alphaforge_cand_last_size or dual_mtime != app._alphaforge_dual_last_mtime or dual_size != app._alphaforge_dual_last_size:
+            app._alphaforge_cand_last_mtime = cand_mtime
+            app._alphaforge_dual_last_mtime = dual_mtime
+            app._alphaforge_cand_last_size = cand_size
+            app._alphaforge_dual_last_size = dual_size
+            app.alphaforge_reload_count = getattr(app, "alphaforge_reload_count", 0) + 1
+
+            try:
+                import time
+                from datetime import datetime
+                candidates, meta = load_alphaforge_candidates_with_meta(active_path)
+                has_error = meta.get("skipped_reason_counts", {}).get("load_error", 0) > 0
+                is_missing = meta.get("skipped_reason_counts", {}).get("missing_file", 0) > 0 or meta.get("skipped_reason_counts", {}).get("no_usable_file", 0) > 0
+                invalid_schema = not candidates and meta.get("raw_count", 0) > 0
+
+                from zoneinfo import ZoneInfo
+                import json
+                tz = ZoneInfo("Asia/Seoul")
+                now_seoul = datetime.now(tz)
+                today_str = now_seoul.strftime("%Y-%m-%d")
+
+                cand_dt = datetime.fromtimestamp(cand_mtime, tz) if cand_mtime > 0 else None
+                cand_age_sec = int(now_seoul.timestamp() - cand_mtime) if cand_mtime > 0 else 0
+
+                app.alphaforge_active_candidate_count = meta.get("raw_count", 0)
+                try:
+                    if dual_path.exists():
+                        with open(dual_path, "r", encoding="utf-8") as f:
+                            d_raw = json.load(f)
+                            d_rows = d_raw if isinstance(d_raw, list) else d_raw.get("rows", []) if isinstance(d_raw, dict) else []
+                            app.alphaforge_dual_candidate_count = len(d_rows)
+                    else:
+                        app.alphaforge_dual_candidate_count = 0
+                except Exception:
+                    app.alphaforge_dual_candidate_count = 0
+
+                stale = False
+                stale_reason = ""
+                today_final = False
+
+                if is_missing:
+                    stale = True
+                    stale_reason = "file_missing"
+                elif has_error:
+                    stale = True
+                    stale_reason = "parse_error"
+                elif invalid_schema:
+                    stale = True
+                    stale_reason = "invalid_schema"
+                elif cand_dt:
+                    cand_date = cand_dt.strftime("%Y-%m-%d")
+                    market_open = now_seoul.replace(hour=9, minute=0, second=0, microsecond=0)
+                    market_close = now_seoul.replace(hour=15, minute=30, second=0, microsecond=0)
+
+                    if cand_date != today_str:
+                        stale = True
+                        stale_reason = "not_published_today"
+                    elif cand_dt < market_open:
+                        stale = True
+                        stale_reason = "before_today_market_open"
+                    elif market_open <= now_seoul <= market_close:
+                        if cand_age_sec > 1800:
+                            stale = True
+                            stale_reason = "age_exceeded_during_market"
+                    elif now_seoul > market_close:
+                        if cand_dt >= market_open:
+                            stale = False
+                            today_final = True
+                else:
+                    stale = True
+                    stale_reason = "unknown_stale_reason"
+
+                if stale and not stale_reason:
+                    stale_reason = "unknown_stale_reason"
+
+                app.alphaforge_source_path = meta.get("path") or str(active_path) if active_path else "None"
+                app.alphaforge_file_exists = not is_missing
+                app.alphaforge_file_mtime = cand_dt.isoformat() if cand_dt else ""
+                app.alphaforge_file_age_seconds = cand_age_sec
+                app.alphaforge_loaded_at = now_seoul.isoformat()
+                app.alphaforge_is_stale = stale
+                app.alphaforge_stale_reason = stale_reason
+                app.alphaforge_today_final = today_final
+
+                session = "closed"
+                mo = now_seoul.replace(hour=9, minute=0, second=0, microsecond=0)
+                mc = now_seoul.replace(hour=15, minute=30, second=0, microsecond=0)
+                if mo <= now_seoul <= mc:
+                    session = "regular"
+                elif now_seoul < mo:
+                    session = "pre"
+                app.alphaforge_market_session = session
+                app.alphaforge_freshness_mode = "manual" if today_final else "auto"
+
+                if has_error or is_missing or invalid_schema:
+                    app.alphaforge_last_reload_error = "file missing, parse error, or invalid schema (using last good)"
+                    logger.warning("alphaforge_reload_failed", error=app.alphaforge_last_reload_error, using_last_good=True)
+                else:
+                    if candidates or not meta.get("raw_count", 0):
+                        if candidates:
+                            app.alphaforge_theme_data = build_alphaforge_theme(candidates).get("AlphaForge", {})
+                        else:
+                            app.alphaforge_theme_data = {}
+
+                        app.alphaforge_candidates_loaded = len(candidates)
+                        app.alphaforge_last_reload_error = ""
+
+                        app.watch_symbols = _build_watch_symbols(app)
+                        app.stock_codes = get_all_stock_codes(_theme_data_for_subscription(app))
+
+                    logger.info("alphaforge_reloaded",
+                        candidate_count=len(candidates),
+                        source_path=str(active_path),
+                        mtime=cand_mtime,
+                        reload_count=app.alphaforge_reload_count
+                    )
+            except Exception as e:
+                app.alphaforge_last_reload_error = str(e)
+                app.alphaforge_stale_reason = "exception"
+                logger.warning("alphaforge_reload_failed", error=str(e), using_last_good=True)
+
     @app.get("/api/themes")
     async def get_themes(sort: str = "default", pinned: str = ""):
+        check_and_reload_alphaforge(app)
         quote_status = getattr(app, "quote_polling_status", {})
         supply_polling_status = getattr(app, "supply_polling_status", {}) or {}
         supply_reason = (
@@ -1319,14 +1461,21 @@ def create_app() -> FastAPI:
                 "theme_load_status": getattr(app, "theme_load_status", "empty"),
                 "theme_load_reason": getattr(app, "theme_load_reason", "산업군 데이터 없음"),
                 "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
-                "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
-                "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
-                "alphaforge_candidates_source": getattr(app, "alphaforge_candidates_source", ""),
-                "alphaforge_candidates_mode": getattr(app, "alphaforge_candidates_mode", ""),
-                "alphaforge_candidates_published_at": getattr(app, "alphaforge_candidates_published_at", ""),
-                "alphaforge_candidates_is_stale": getattr(app, "alphaforge_candidates_is_stale", False),
-                "alphaforge_candidates_stale_age_hours": getattr(app, "alphaforge_candidates_stale_age_hours", -1.0),
-                "alphaforge_candidates_fallback_warning": getattr(app, "alphaforge_candidates_fallback_warning", ""),
+                "alphaforge_active_candidate_count": getattr(app, "alphaforge_active_candidate_count", 0),
+                "alphaforge_dual_candidate_count": getattr(app, "alphaforge_dual_candidate_count", 0),
+                "alphaforge_selected_candidate_count": getattr(app, "alphaforge_candidates_loaded", 0),
+                "alphaforge_reload_count": getattr(app, "alphaforge_reload_count", 0),
+                "alphaforge_last_reload_error": getattr(app, "alphaforge_last_reload_error", ""),
+                "alphaforge_source_path": getattr(app, "alphaforge_source_path", ""),
+                "alphaforge_file_exists": getattr(app, "alphaforge_file_exists", False),
+                "alphaforge_file_mtime": getattr(app, "alphaforge_file_mtime", ""),
+                "alphaforge_file_age_seconds": getattr(app, "alphaforge_file_age_seconds", 0),
+                "alphaforge_loaded_at": getattr(app, "alphaforge_loaded_at", ""),
+                "alphaforge_is_stale": getattr(app, "alphaforge_is_stale", False),
+                "alphaforge_stale_reason": getattr(app, "alphaforge_stale_reason", ""),
+                "alphaforge_market_session": getattr(app, "alphaforge_market_session", ""),
+                "alphaforge_freshness_mode": getattr(app, "alphaforge_freshness_mode", ""),
+                "alphaforge_today_final": getattr(app, "alphaforge_today_final", False),
             "alphaforge_picks": [],
             "quote_polling": quote_status,
             "supply_data_reason": supply_reason,
@@ -1599,14 +1748,21 @@ def create_app() -> FastAPI:
             "theme_load_status": getattr(app, "theme_load_status", "ok"),
             "theme_load_reason": getattr(app, "theme_load_reason", ""),
             "alphaforge_candidates_loaded": getattr(app, "alphaforge_candidates_loaded", 0),
-            "alphaforge_candidates_path": getattr(app, "alphaforge_candidates_path", ""),
-            "alphaforge_candidates_generated_at": getattr(app, "alphaforge_candidates_generated_at", ""),
-            "alphaforge_candidates_source": getattr(app, "alphaforge_candidates_source", ""),
-            "alphaforge_candidates_mode": getattr(app, "alphaforge_candidates_mode", ""),
-            "alphaforge_candidates_published_at": getattr(app, "alphaforge_candidates_published_at", ""),
-            "alphaforge_candidates_is_stale": getattr(app, "alphaforge_candidates_is_stale", False),
-            "alphaforge_candidates_stale_age_hours": getattr(app, "alphaforge_candidates_stale_age_hours", -1.0),
-            "alphaforge_candidates_fallback_warning": getattr(app, "alphaforge_candidates_fallback_warning", ""),
+            "alphaforge_active_candidate_count": getattr(app, "alphaforge_active_candidate_count", 0),
+            "alphaforge_dual_candidate_count": getattr(app, "alphaforge_dual_candidate_count", 0),
+            "alphaforge_selected_candidate_count": getattr(app, "alphaforge_candidates_loaded", 0),
+            "alphaforge_reload_count": getattr(app, "alphaforge_reload_count", 0),
+            "alphaforge_last_reload_error": getattr(app, "alphaforge_last_reload_error", ""),
+            "alphaforge_source_path": getattr(app, "alphaforge_source_path", ""),
+            "alphaforge_file_exists": getattr(app, "alphaforge_file_exists", False),
+            "alphaforge_file_mtime": getattr(app, "alphaforge_file_mtime", ""),
+            "alphaforge_file_age_seconds": getattr(app, "alphaforge_file_age_seconds", 0),
+            "alphaforge_loaded_at": getattr(app, "alphaforge_loaded_at", ""),
+            "alphaforge_is_stale": getattr(app, "alphaforge_is_stale", False),
+            "alphaforge_stale_reason": getattr(app, "alphaforge_stale_reason", ""),
+            "alphaforge_market_session": getattr(app, "alphaforge_market_session", ""),
+            "alphaforge_freshness_mode": getattr(app, "alphaforge_freshness_mode", ""),
+            "alphaforge_today_final": getattr(app, "alphaforge_today_final", False),
             "alphaforge_picks": alphaforge_picks,
             "symbol_names": _watch_symbol_names(app),
             "quote_polling": display_quote_status,
@@ -1632,6 +1788,7 @@ def create_app() -> FastAPI:
     @app.get("/api/decision-summary")
     async def get_decision_summary():
         """Decision Engine 요약 API."""
+        check_and_reload_alphaforge(app)
         alphaforge_theme = getattr(app, "alphaforge_theme_data", {}) or {}
         picks_raw = alphaforge_theme.get("stocks", [])
         stock_ticks = {
