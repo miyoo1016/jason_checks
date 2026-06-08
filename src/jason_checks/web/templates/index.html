@@ -138,22 +138,28 @@
                         <div class="flex items-center gap-2 min-w-0">
                             <span class="text-sm font-black tracking-tighter flex items-center">
                                 <span x-text="indices[code]?.name || (code === '0001' ? 'KOSPI' : 'KOSDAQ')"></span>
-                                <template x-if="indices[code]?.source === 'dummy' || indices[code]?.source === 'mock' || (indices[code]?.price || 0) <= 0">
-                                    <span class="text-[9px] font-normal text-red-500 bg-red-50 px-1 py-0.5 rounded ml-1.5" title="지수 조회 실패">지수 조회 실패</span>
+                                <template x-if="indices[code]?.is_sane === false || indices[code]?.source === 'UNAVAILABLE' || indices[code]?.source === 'dummy' || (indices[code]?.price || 0) <= 0">
+                                    <div class="flex items-center gap-1.5 ml-1.5">
+                                        <span class="text-[10px] font-bold text-red-500" title="지수 조회 실패">지수 데이터 확인 필요</span>
+                                        <span class="text-[8px] font-bold px-1 py-0.5 rounded tracking-tight"
+                                              :class="indices[code]?.source === 'UNAVAILABLE' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'"
+                                              x-text="indices[code]?.source || 'UNAVAILABLE'"></span>
+                                    </div>
                                 </template>
                             </span>
-                            <template x-if="!(indices[code]?.source === 'dummy' || indices[code]?.source === 'mock' || (indices[code]?.price || 0) <= 0)">
-                                <div class="flex items-center gap-2">
+                            <template x-if="!(indices[code]?.is_sane === false || indices[code]?.source === 'UNAVAILABLE' || indices[code]?.source === 'dummy' || (indices[code]?.price || 0) <= 0)">
+                                <div class="flex items-center gap-1.5">
                                     <span class="text-sm mono font-bold"
                                           :class="{'up': (indices[code]?.change_pct || 0) > 0, 'down': (indices[code]?.change_pct || 0) < 0}"
                                           x-text="(indices[code]?.price || 0).toFixed(2)"></span>
                                     <span class="text-xs mono font-bold"
                                           :class="{'up': (indices[code]?.change_pct || 0) > 0, 'down': (indices[code]?.change_pct || 0) < 0}"
                                           x-text="`${(indices[code]?.change_pct || 0) >= 0 ? '▲' : '▼'} ${Math.abs(indices[code]?.change_pct || 0).toFixed(2)}%`"></span>
+                                    <span class="text-[8px] font-bold px-1 py-0.5 rounded tracking-tight ml-0.5"
+                                          :class="indices[code]?.source === 'KIS' ? 'bg-indigo-100 text-indigo-700' : (indices[code]?.source === 'NAVER' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500')"
+                                          x-text="indices[code]?.source || 'UNKNOWN'"></span>
+                                    <span class="text-[8px] font-bold bg-blue-100 text-blue-700 px-1 py-0.5 rounded tracking-tight">LIVE</span>
                                 </div>
-                            </template>
-                            <template x-if="indices[code]?.source === 'dummy' || indices[code]?.source === 'mock' || (indices[code]?.price || 0) <= 0">
-                                <span class="text-sm mono font-bold text-gray-400 ml-2">-</span>
                             </template>
                         </div>
                         <div class="w-28 h-8 flex-shrink-0">

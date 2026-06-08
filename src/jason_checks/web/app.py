@@ -1855,10 +1855,28 @@ def create_app() -> FastAPI:
 
     @app.get("/api/indices")
     async def get_indices():
+        import math
         result = {}
         for code, idx in app_state.indices.items():
             source = getattr(idx, "source", "live")
-            if source in ("dummy", "mock") or idx.price <= 0:
+            source_detail = getattr(idx, "source_detail", "")
+            fetched_at = getattr(idx, "fetched_at", "")
+            age_seconds = getattr(idx, "age_seconds", 0)
+            is_stale = getattr(idx, "is_stale", False)
+            is_sane = getattr(idx, "is_sane", True)
+            sanity_warnings = list(getattr(idx, "sanity_warnings", []))
+            fallback_reason = getattr(idx, "fallback_reason", "")
+
+            # If price <= 0 or not sane, make sure it's invalid
+            if idx.price <= 0 or not idx.price or math.isnan(idx.price):
+                is_sane = False
+                if source != "UNAVAILABLE":
+                    source = "UNAVAILABLE"
+                    source_detail = "invalid_price"
+                if "invalid_price" not in sanity_warnings:
+                    sanity_warnings.append("invalid_price")
+
+            if source in ("dummy", "mock") or not is_sane:
                 sparkline = {"status": "DATA_NA", "points": [], "baseline": 0.0}
             else:
                 sparkline = {
@@ -1868,8 +1886,17 @@ def create_app() -> FastAPI:
                 } if idx.sparkline_points else None
 
             result[code] = {
-                "name": idx.name, "price": idx.price, "change_pct": idx.change_pct,
+                "name": idx.name,
+                "price": idx.price,
+                "change_pct": idx.change_pct,
                 "source": source,
+                "source_detail": source_detail,
+                "fetched_at": fetched_at,
+                "age_seconds": age_seconds,
+                "is_stale": is_stale,
+                "is_sane": is_sane,
+                "sanity_warnings": sanity_warnings,
+                "fallback_reason": fallback_reason,
                 "investor_foreigner": idx.investor_foreigner,
                 "investor_institution": idx.investor_institution,
                 "investor_individual": idx.investor_individual,

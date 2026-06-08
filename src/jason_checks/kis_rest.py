@@ -446,17 +446,33 @@ async def fetch_naver_index(code: str) -> dict:
         resp = await client.get(url, headers=headers, timeout=3.0)
         resp.raise_for_status()
         data = resp.json()
-        price = float(data.get("closePrice", "0").replace(",", ""))
-        chg_val = float(data.get("compareToPreviousClosePrice", "0").replace(",", ""))
-        chg_pct = float(data.get("fluctuationsRatio", "0").replace(",", ""))
-        sign_code = data.get("compareToPreviousPrice", {}).get("code", "")
 
-        chg_pct, chg_val = _compute_index_changes(price, chg_val, chg_pct, sign_code)
+        def _parse_num(val):
+            if not val:
+                return 0.0
+            val_str = str(val).replace(",", "").replace("%", "").strip()
+            try:
+                return float(val_str)
+            except Exception:
+                return 0.0
+
+        price = _parse_num(data.get("closePrice") or data.get("currentPrice") or 0)
+        chg_val = _parse_num(data.get("compareToPreviousClosePrice") or data.get("compareToPreviousPrice") or 0)
+        chg_pct = _parse_num(data.get("fluctuationsRatio") or data.get("changeRate") or 0)
+
+        sign_code = str(data.get("compareToPreviousPrice", {}).get("code", "") if isinstance(data.get("compareToPreviousPrice"), dict) else data.get("compareToPreviousPriceCode", ""))
+
+        if sign_code in ["4", "5"] or chg_val < 0:
+            if chg_pct > 0:
+                chg_pct = -chg_pct
+        elif sign_code in ["1", "2"] or chg_val > 0:
+            if chg_pct < 0:
+                chg_pct = -chg_pct
 
         return {
             "price": price,
-            "change_pct": chg_pct,
-            "change_value": chg_val
+            "change_pct": round(chg_pct, 2),
+            "change_value": round(chg_val, 2)
         }
 
 
@@ -522,41 +538,83 @@ async def fetch_market_indices(market: str = "KR") -> dict:
                     chg_pct = float(out.get("rate", 0) or 0)
                     chg_val = float(out.get("diff", 0) or 0)
 
-                # If KOSPI price is dummy (exceeds 5000)
-                if market == "KR" and code == "0001" and price > 5000:
+                # If KOSPI price is dummy (exceeds 6000)
+                if market == "KR" and code == "0001" and price > 6000:
                     source = "dummy"
 
+                source_detail = source
                 if source == "dummy" and market == "KR" and code in ["0001", "1001"]:
                     try:
                         fallback_data = await fetch_naver_index(code)
                         price = fallback_data["price"]
                         chg_pct = fallback_data["change_pct"]
                         chg_val = fallback_data["change_value"]
-                        source = "naver"
+                        source = "NAVER"
+                        source_detail = "NAVER (dummy fallback)"
                     except Exception as fallback_e:
                         logger.warning("fallback_index_failed", code=code, error=str(fallback_e))
+                        source = "UNAVAILABLE"
+                        source_detail = f"NAVER fallback failed: {fallback_e}"
 
-                if price > 0:
-                    results[code] = {
-                        "name": name,
-                        "price": price if source != "dummy" else 0.0,
-                        "change_pct": chg_pct if source != "dummy" else 0.0,
-                        "change_value": chg_val if source != "dummy" else 0.0,
-                        "source": source,
-                    }
+                if source == "live":
+                    source = "KIS"
+                    source_detail = "KIS Live"
+
+                is_sane = True
+                sanity_warnings = []
+                fallback_reason = "dummy_detected" if "dummy fallback" in source_detail else ""
+
+                if source != "UNAVAILABLE":
+                    if market == "KR":
+                        if code == "0001" and not (1000 <= price <= 6000):
+                            is_sane = False
+                            sanity_warnings.append(f"KOSPI price {price} out of range (1000~6000)")
+                        if code == "1001" and not (300 <= price <= 2000):
+                            is_sane = False
+                            sanity_warnings.append(f"KOSDAQ price {price} out of range (300~2000)")
+
+                    if abs(chg_pct) > 15.0:
+                        is_sane = False
+                        sanity_warnings.append(f"Change pct {chg_pct}% too extreme")
+                else:
+                    is_sane = False
+                    sanity_warnings.append("Data fetch completely failed")
+
+                results[code] = {
+                    "name": name,
+                    "price": price if is_sane else 0.0,
+                    "change_pct": chg_pct if is_sane else 0.0,
+                    "change_value": chg_val if is_sane else 0.0,
+                    "source": source,
+                    "source_detail": source_detail,
+                    "fetched_at": datetime.now().isoformat(),
+                    "age_seconds": 0,
+                    "is_stale": False,
+                    "is_sane": is_sane,
+                    "sanity_warnings": sanity_warnings,
+                    "fallback_reason": fallback_reason,
+                }
+
+                logger.info("index_fetch", code=code, source=source, price=price, change_pct=chg_pct, is_sane=is_sane, warnings=sanity_warnings)
+
             # Important: Sleep to avoid EGW00201 on the next iteration
             await asyncio.sleep(1.0)
         except Exception as e:
             logger.warning("index_exception", code=code, error=str(e))
-            if market == "KR" and code == "0001":
-                # KOSPI 실제 지수 조회 실패 시 더미값 대신 DATA_NA/실패로 처리할 수 있도록 결과 반환
-                results[code] = {
-                    "name": name,
-                    "price": 0.0,
-                    "change_pct": 0.0,
-                    "change_value": 0.0,
-                    "source": "dummy",
-                }
+            results[code] = {
+                "name": name,
+                "price": 0.0,
+                "change_pct": 0.0,
+                "change_value": 0.0,
+                "source": "UNAVAILABLE",
+                "source_detail": f"Exception: {e}",
+                "fetched_at": datetime.now().isoformat(),
+                "age_seconds": 0,
+                "is_stale": False,
+                "is_sane": False,
+                "sanity_warnings": [f"Exception occurred: {e}"],
+                "fallback_reason": "",
+            }
             await asyncio.sleep(1.0)
 
     return results

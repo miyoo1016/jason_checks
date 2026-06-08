@@ -44,11 +44,25 @@ def _assess_market_gate(indices: dict[str, Any]) -> dict[str, Any]:
         }
 
     pcts = []
+    has_invalid = False
     for idx in indices.values():
+        if idx.get("source") == "UNAVAILABLE" or not idx.get("is_sane", True):
+            has_invalid = True
+            continue
         if idx.get("source") in ("dummy", "mock") or float(idx.get("price") or 0) <= 0:
             continue
         pct = float(idx.get("change_pct") or 0)
         pcts.append(pct)
+
+    if has_invalid and not pcts:
+        return {
+            "ok": True,
+            "reason": "indices_invalid",
+            "level": "NORMAL",
+            "market_gate_level": "NORMAL",
+            "market_gate_reason": "indices_invalid",
+            "market_gate_blocks_buy_now": False,
+        }
 
     if not pcts:
         return {

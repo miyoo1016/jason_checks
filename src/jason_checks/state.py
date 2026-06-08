@@ -62,6 +62,13 @@ class IndexState:
     investor_institution: int = 0
     investor_individual: int = 0
     source: str = "live"            # "live" or "dummy" / "mock"
+    source_detail: str = ""
+    fetched_at: str = ""
+    age_seconds: int = 0
+    is_stale: bool = False
+    is_sane: bool = True
+    sanity_warnings: list[str] = field(default_factory=list)
+    fallback_reason: str = ""
     updated_ts: datetime = field(default_factory=datetime.now)
     sparkline_points: Dict[int, float] = field(default_factory=dict)
 
