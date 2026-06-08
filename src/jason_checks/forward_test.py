@@ -14,6 +14,9 @@ KST = ZoneInfo("Asia/Seoul")
 _signals_cache = []
 _cache_mtime = 0
 _cache_file_size = 0
+_cache_metadata = {}
+_MAX_LOG_BYTES = 1_000_000
+_MAX_LOG_LINES = 5000
 
 def _decision_journal_path() -> Path:
     project_root = Path(__file__).parent.parent.parent
@@ -30,9 +33,10 @@ def _normalize_symbol(code: object) -> str:
 
 
 def _load_signals_cached(path: Path) -> list[dict]:
-    """mtime & size 변동이 없으면 파싱 결과를 캐시에서 반환하는 고속 로더."""
-    global _signals_cache, _cache_mtime, _cache_file_size
+    """Load only the tail of a large append-only decision journal."""
+    global _signals_cache, _cache_mtime, _cache_file_size, _cache_metadata
     if not path.exists():
+        _cache_metadata = {}
         return []
 
     try:
@@ -40,26 +44,50 @@ def _load_signals_cached(path: Path) -> list[dict]:
         if stat.st_mtime == _cache_mtime and stat.st_size == _cache_file_size:
             return _signals_cache
 
+        start = max(stat.st_size - _MAX_LOG_BYTES, 0)
+        with open(path, "rb") as f:
+            if start:
+                f.seek(start)
+                f.readline()  # discard a possible partial JSONL row
+            raw = f.read(_MAX_LOG_BYTES)
+        loaded_size = len(raw)
+        text = raw.decode("utf-8", errors="ignore")
+        lines = text.splitlines()
+        if len(lines) > _MAX_LOG_LINES:
+            lines = lines[-_MAX_LOG_LINES:]
+
         signals = []
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                    signals.append(row)
-                except Exception:
-                    continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                signals.append(row)
+            except Exception:
+                continue
 
         _signals_cache = signals
         _cache_mtime = stat.st_mtime
         _cache_file_size = stat.st_size
-        logger.info("forward_test_log_loaded", count=len(signals), size_mb=round(stat.st_size / (1024*1024), 2))
+        _cache_metadata = {
+            "file_size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "loaded_size_mb": round(loaded_size / (1024 * 1024), 2),
+            "truncated": start > 0 or len(text.splitlines()) > _MAX_LOG_LINES,
+            "max_bytes": _MAX_LOG_BYTES,
+            "max_lines": _MAX_LOG_LINES,
+            "loaded_line_count": len(lines),
+            "parsed_count": len(signals),
+        }
+        logger.info("forward_test_log_loaded", count=len(signals), **_cache_metadata)
     except Exception as e:
         logger.warning("forward_test_load_failed_use_cached", error=str(e))
         
     return _signals_cache
+
+
+def _forward_log_metadata() -> dict:
+    return dict(_cache_metadata or {})
 
 
 def _aggregate_returns(returns: list[float]) -> dict:
@@ -140,7 +168,9 @@ def run_forward_test() -> dict:
 
     all_signals = _load_signals_cached(path)
     if not all_signals:
-        return _make_insufficient_response("기록된 신호 없음")
+        response = _make_insufficient_response("기록된 신호 없음")
+        response["forward_log"] = _forward_log_metadata()
+        return response
 
     # 2. 중복 제거 (동일 symbol/date의 최신 signal만 추출)
     # KST 기준 날짜별로 그룹화
@@ -244,7 +274,9 @@ def run_forward_test() -> dict:
 
     # 데이터가 아예 없는 경우 처리
     if not all_evaluated_signals:
-        return _make_insufficient_response("유효한 분석 대상 신호 없음")
+        response = _make_insufficient_response("유효한 분석 대상 신호 없음")
+        response["forward_log"] = _forward_log_metadata()
+        return response
 
     # 5. 전체 집계 (by_decision, by_setup_label, blocked_quality)
     by_decision = {}
@@ -297,6 +329,7 @@ def run_forward_test() -> dict:
         "by_market_gate_level": by_market_gate_level,
         "by_reason_code": by_reason_code,
         "blocked_quality": overall_blocked_quality,
+        "forward_log": _forward_log_metadata(),
         "last_updated": datetime.now(KST).isoformat()
     }
 

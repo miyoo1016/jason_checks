@@ -1136,6 +1136,73 @@ def create_app() -> FastAPI:
             "mode": get_settings().kis_mode,
         }
 
+    @app.get("/api/kr/sector-leaders")
+    async def get_kr_sector_leaders():
+        """Compatibility endpoint for the dashboard KR sector leader poller."""
+        now = datetime.now().isoformat()
+        theme_data = getattr(app, "theme_data", {}) or {}
+        if not theme_data:
+            return {
+                "ok": True,
+                "sectors": [],
+                "leaders": [],
+                "source": "compat_empty",
+                "generated_at": now,
+                "updated_at": now,
+            }
+
+        stock_ticks = {
+            _normalize_symbol(code): {
+                "price": stock.price,
+                "change_pct": stock.change_pct,
+                "cumulative_trading_value": stock.cumulative_trading_value,
+                "strength": stock.execution_strength,
+            }
+            for code, stock in app_state.stocks.items()
+        }
+        sectors = []
+        flat_leaders = []
+        for theme_code, theme_config in theme_data.items():
+            try:
+                leaders = select_leaders(theme_code, stock_ticks, theme_data, sort_mode="default")[:4]
+            except Exception as e:
+                logger.warning("kr_sector_leaders_compat_theme_failed", theme=theme_code, error=str(e))
+                leaders = []
+            rows = []
+            for leader in leaders:
+                code = _normalize_symbol(leader.get("code"))
+                tick = stock_ticks.get(code, {})
+                row = {
+                    "code": code,
+                    "symbol": code,
+                    "name": leader.get("name", code),
+                    "score": leader.get("score", 0),
+                    "price": tick.get("price", 0),
+                    "change_pct": tick.get("change_pct", 0),
+                    "cumulative_trading_value": tick.get("cumulative_trading_value", 0),
+                    "strength": tick.get("strength", 0),
+                    "theme": theme_code,
+                }
+                rows.append(row)
+                flat_leaders.append(row)
+            sectors.append({
+                "code": theme_code,
+                "name": theme_config.get("display_name", theme_code),
+                "display_name": theme_config.get("display_name", theme_code),
+                "leaders": rows,
+                "leader_count": len(rows),
+                "source": "themes",
+            })
+
+        return {
+            "ok": True,
+            "sectors": sectors,
+            "leaders": flat_leaders,
+            "source": "themes",
+            "generated_at": now,
+            "updated_at": now,
+        }
+
     @app.post("/api/signal-journal")
     async def save_signal_journal_endpoint():
         return save_signal_journal(getattr(app, "theme_data", {}), market=CURRENT_MARKET)
