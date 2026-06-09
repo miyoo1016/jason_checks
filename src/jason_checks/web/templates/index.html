@@ -528,34 +528,97 @@
                                     </template>
                                 </div>
 
-                                <!-- 알림유형별 -->
+                                <!-- 알림유형별 진단 -->
                                 <template x-if="Object.keys(alphaForgeValidation.by_alert_type || {}).length > 0">
-                                    <div>
-                                        <div class="text-[9.5px] font-black text-indigo-800 mb-1 uppercase tracking-wider">알림 유형별</div>
-                                        <div class="space-y-1">
-                                            <template x-for="[atype, adata] in Object.entries(alphaForgeValidation.by_alert_type || {})" :key="'at-'+atype">
-                                                <div class="bg-white/70 rounded border border-indigo-100 px-2 py-1 flex flex-wrap items-center gap-2 text-[9.5px]">
-                                                    <span class="font-black text-indigo-900 min-w-[90px]" x-text="atype"></span>
-                                                    <span class="bg-indigo-50 text-indigo-700 rounded px-1 font-bold" x-text="`n=${adata.n}`"></span>
-                                                    <template x-if="adata.n < (alphaForgeValidation.min_n || 20)">
-                                                        <span class="text-slate-400 font-semibold">통계 부족 (n &lt; <span x-text="alphaForgeValidation.min_n || 20"></span>)</span>
-                                                    </template>
-                                                    <template x-if="adata.n >= (alphaForgeValidation.min_n || 20)">
-                                                        <div class="flex flex-wrap gap-1.5">
-                                                            <template x-for="w in (alphaForgeValidation.windows || [1,3,5,10,20])" :key="'at-w-'+w">
-                                                                <template x-if="!adata.windows?.[w]?.insufficient">
-                                                                    <span class="font-mono font-bold"
-                                                                          :class="(adata.windows?.[w]?.avg_net_alpha || 0) >= 0 ? 'text-red-500' : 'text-blue-500'"
-                                                                          x-text="`${w}d: ${((adata.windows?.[w]?.avg_net_alpha || 0)*100 >= 0 ? '+' : '')}${((adata.windows?.[w]?.avg_net_alpha || 0)*100).toFixed(2)}%`"></span>
-                                                                </template>
-                                                                <template x-if="adata.windows?.[w]?.insufficient">
-                                                                    <span class="text-slate-300 font-mono" x-text="`${w}d:-`"></span>
-                                                                </template>
-                                                            </template>
-                                                        </div>
-                                                    </template>
+                                    <div x-data="{ open: false, minN: alphaForgeValidation.min_n || 20 }" class="mt-3 border border-indigo-100 rounded-lg bg-white overflow-hidden shadow-sm">
+                                        <!-- Header / Summary (Click to expand) -->
+                                        <div @click="open = !open" class="cursor-pointer p-2.5 flex flex-col gap-1.5 transition-colors hover:bg-slate-50">
+                                            <div class="flex justify-between items-center">
+                                                <div class="text-[10px] font-black text-indigo-800 uppercase tracking-wider flex items-center gap-1.5">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-indigo-500" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
+                                                    </svg>
+                                                    알림 유형 진단
                                                 </div>
-                                            </template>
+                                                <div class="text-[9px] font-bold text-indigo-400 bg-indigo-50 px-1.5 py-0.5 rounded" x-text="open ? '접기 ▲' : '자세히 보기 ▼'"></div>
+                                            </div>
+
+                                            <!-- Summary shown when collapsed -->
+                                            <div x-show="!open" class="text-[9.5px]">
+                                                <template x-if="Object.values(alphaForgeValidation.by_alert_type || {}).some(d => d.n > 0)">
+                                                    <div class="flex flex-col gap-1.5 mt-0.5">
+                                                        <div class="flex flex-wrap items-center gap-1.5">
+                                                            <span class="font-bold text-slate-400 w-12 shrink-0">주요 알림</span>
+                                                            <div class="flex flex-wrap gap-1">
+                                                                <template x-for="[atype, adata] in Object.entries(alphaForgeValidation.by_alert_type || {}).filter(([k,v]) => v.n > 0 && ['BUY_NOW','CONDITIONAL_BUY','STARTER_POSITION','PRIORITY_WATCH','SETUP_WATCH','WATCH_ONLY'].includes(k))" :key="'sum1-'+atype">
+                                                                    <div class="flex items-center bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5">
+                                                                        <span class="font-bold"
+                                                                              :class="{'text-red-600': ['BUY_NOW','CONDITIONAL_BUY','STARTER_POSITION'].includes(atype), 'text-blue-600': ['PRIORITY_WATCH','SETUP_WATCH','WATCH_ONLY'].includes(atype)}"
+                                                                              x-text="atype"></span>
+                                                                        <span class="font-bold text-slate-500 ml-1" x-text="adata.n"></span>
+                                                                    </div>
+                                                                </template>
+                                                            </div>
+                                                        </div>
+                                                        <div class="flex flex-wrap items-center gap-1.5">
+                                                            <span class="font-bold text-slate-400 w-12 shrink-0">주의/제외</span>
+                                                            <div class="flex flex-wrap gap-1">
+                                                                <template x-for="[atype, adata] in Object.entries(alphaForgeValidation.by_alert_type || {}).filter(([k,v]) => v.n > 0 && ['RISK_WATCH','AVOID','REJECTED'].includes(k))" :key="'sum2-'+atype">
+                                                                    <div class="flex items-center bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5">
+                                                                        <span class="font-bold text-orange-500" x-text="atype"></span>
+                                                                        <span class="font-bold text-slate-500 ml-1" x-text="adata.n"></span>
+                                                                    </div>
+                                                                </template>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                                <template x-if="!Object.values(alphaForgeValidation.by_alert_type || {}).some(d => d.n > 0)">
+                                                    <div class="text-slate-400 italic">표시할 활성 알림 내역이 없습니다.</div>
+                                                </template>
+                                            </div>
+                                        </div>
+
+                                        <!-- Expanded Details -->
+                                        <div x-show="open" class="border-t border-indigo-50 bg-slate-50/70 p-2.5" style="display: none;">
+                                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                                <template x-for="[atype, adata] in Object.entries(alphaForgeValidation.by_alert_type || {})" :key="'det-'+atype">
+                                                    <div class="bg-white rounded shadow-sm border border-gray-200 p-2 flex flex-col gap-1 text-[9.5px]">
+                                                        <div class="flex justify-between items-center mb-0.5">
+                                                            <span class="font-black"
+                                                                  :class="{
+                                                                      'text-red-600': ['BUY_NOW','CONDITIONAL_BUY','STARTER_POSITION'].includes(atype),
+                                                                      'text-blue-600': ['PRIORITY_WATCH','SETUP_WATCH','WATCH_ONLY'].includes(atype),
+                                                                      'text-orange-500': ['RISK_WATCH','AVOID','REJECTED'].includes(atype),
+                                                                      'text-slate-700': !['BUY_NOW','CONDITIONAL_BUY','STARTER_POSITION','PRIORITY_WATCH','SETUP_WATCH','WATCH_ONLY','RISK_WATCH','AVOID','REJECTED'].includes(atype)
+                                                                  }"
+                                                                  x-text="atype"></span>
+                                                            <span class="bg-slate-100 text-slate-600 rounded px-1.5 py-0.5 font-bold border border-slate-200" x-text="`n=${adata.n}`"></span>
+                                                        </div>
+
+                                                        <template x-if="adata.n >= minN">
+                                                            <div class="flex flex-wrap gap-1.5 mt-0.5">
+                                                                <template x-for="w in (alphaForgeValidation.windows || [1,3,5,10,20])" :key="'at-w-'+w">
+                                                                    <template x-if="!adata.windows?.[w]?.insufficient">
+                                                                        <span class="font-mono font-bold bg-slate-50 px-1 rounded border border-slate-100"
+                                                                              :class="(adata.windows?.[w]?.avg_net_alpha || 0) >= 0 ? 'text-red-500' : 'text-blue-500'"
+                                                                              x-text="`${w}d: ${((adata.windows?.[w]?.avg_net_alpha || 0)*100 >= 0 ? '+' : '')}${((adata.windows?.[w]?.avg_net_alpha || 0)*100).toFixed(2)}%`"></span>
+                                                                    </template>
+                                                                    <template x-if="adata.windows?.[w]?.insufficient">
+                                                                        <span class="text-slate-300 font-mono bg-slate-50 px-1 rounded border border-slate-100" x-text="`${w}d:-`"></span>
+                                                                    </template>
+                                                                </template>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                            <div class="text-[8.5px] font-bold text-indigo-400 text-right mt-2.5 px-1 flex items-center justify-end gap-1">
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+                                                </svg>
+                                                n &lt; <span x-text="minN"></span> 항목은 통계 신뢰도가 낮아 수익률이 표기되지 않습니다.
+                                            </div>
                                         </div>
                                     </div>
                                 </template>
@@ -570,14 +633,7 @@
                                 <span class="text-sm font-black text-slate-800">AlphaForge Picks <span class="text-[10px] text-fuchsia-600 bg-fuchsia-50 px-1 py-0.5 rounded ml-1 font-bold" x-text="alphaForgeAgeBadge()"></span></span>
                                 <span class="mono text-[10px] font-black text-blue-700 bg-blue-50 rounded px-1.5 py-0.5"
                                       x-text="`${alphaForgePicks().length}개`"></span>
-                                <div class="flex rounded border border-gray-200 overflow-hidden text-[9px] mono font-black">
-                                    <button class="px-1.5 py-0.5"
-                                            :class="miniChartInterval === '1m' ? 'bg-slate-800 text-white' : 'bg-white text-gray-500'"
-                                            @click="setMiniChartInterval('1m')">1m</button>
-                                    <button class="px-1.5 py-0.5 border-l border-gray-200"
-                                            :class="miniChartInterval === '5m' ? 'bg-slate-800 text-white' : 'bg-white text-gray-500'"
-                                            @click="setMiniChartInterval('5m')">5m</button>
-                                </div>
+                                <span class="text-[9px] mono font-black bg-slate-800 text-white rounded px-1.5 py-0.5">Today 5m</span>
                             </div>
                             <span class="text-[10px] text-gray-500">실시간 조건부 매수 의사결정 보조</span>
                         </div>
@@ -628,6 +684,7 @@
                                         </div>
                                         <!-- Right State Candle + Trend -->
                                         <div class="leader-chart-mini justify-self-end bg-slate-50 rounded px-1 py-0.5">
+                                            <div class="text-[7px] leading-none text-slate-500 mono font-bold text-right" x-text="miniTrendLabel(stock)"></div>
                                             <div x-html="renderStateCandle(stock, { width: 38, height: 34 })"></div>
                                             <div x-html="renderMiniTrendLine(stock, { width: 88, height: 28, limit: 18 })"></div>
                                         </div>
@@ -762,6 +819,7 @@
                                                     </div>
                                                 </div>
                                                 <div class="leader-chart-mini bg-slate-50 rounded px-1 py-0.5">
+                                                    <div class="text-[7px] leading-none text-slate-500 mono font-bold text-right" x-text="miniTrendLabel(stock)"></div>
                                                     <div class="state-candle-box"
                                                          x-html="renderStateCandle(stock, { width: 36, height: 34 })"></div>
                                                     <div class="trend-line-box"

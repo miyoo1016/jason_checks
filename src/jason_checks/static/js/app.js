@@ -37,7 +37,7 @@ function timaApp() {
         stocks: {},
         liveQuotes: {},
         barSeriesByCode: {},
-        miniChartInterval: '1m',
+        miniChartInterval: '5m',
         symbolNames: {},
         indices: {},  // { "0001": {name, price, change_pct, investor_*}, "1001": {...} }
         wsConnected: false,
@@ -781,7 +781,7 @@ ${nodes}\
             const wickTop = neutral ? Math.max(3, bodyY - 4) : Math.min(yHigh, yLow);
             const wickBottom = neutral ? Math.min(H - 10, bodyY + bodyH + 4) : Math.max(yHigh, yLow);
             const title = [
-                `state candle: ${label}${label === '1m' || label === '5m' ? ' current bucket' : ''}`,
+                `state candle: ${label}${label === '5m' ? ' current bucket' : ''}`,
                 `O ${this.formatStatePrice(model.open)}`,
                 `H ${this.formatStatePrice(model.high)}`,
                 `L ${this.formatStatePrice(model.low)}`,
@@ -805,8 +805,10 @@ ${nodes}\
             const limit = Number(options.limit) || 16;
             const chart = this.trendLineChart(stock);
             const source = chart?.source || 'current';
-            const trendLabel = chart?.trend_label || '현재가 flat';
-            let points = this.chartPoints(chart).slice(-limit);
+            let points = this.chartPoints(chart);
+            if (chart?.sparkline_range !== 'today') {
+                points = points.slice(-limit);
+            }
             if (points.length === 0) {
                 const flat = this.chartFromQuote(stock?.price, stock?.change_pct);
                 points = this.chartPoints(flat).slice(-2);
@@ -828,9 +830,11 @@ ${nodes}\
             const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(Number(p.p)).toFixed(1)}`).join(' ');
             const first = Number(points[0].p);
             const last = Number(points[points.length - 1].p);
-            const color = last >= first ? '#D81E26' : '#1A5CDD';
-            const muted = source === 'current' || source === 'placeholder';
-            const title = `trend: ${trendLabel}, points ${points.length}, source ${source}`;
+            const baseline = Number(chart?.baseline);
+            const ref = Number.isFinite(baseline) && baseline > 0 ? baseline : first;
+            const color = last >= ref ? '#D81E26' : '#1A5CDD';
+            const muted = chart?.sparkline_is_fallback || source === 'current' || source === 'placeholder' || source === 'fallback_quote';
+            const title = this.chartTitle(chart, source);
             return `\
 <svg class="mini-trend-line" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
 <title>${title}</title>\
@@ -841,7 +845,11 @@ ${nodes}\
         trendLineChart(stock) {
             if (!stock) return null;
             const code = this.normalizeCode(stock.code || stock.symbol);
-            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const serverChart = stock.sparkline || stock.price_chart || stock.chart;
+            if (serverChart && Array.isArray(serverChart.points) && serverChart.points.length >= 3) {
+                return serverChart;
+            }
+            const selected = '5m';
             const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
             const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
             if (selectedBars.length >= 2) {
@@ -865,7 +873,7 @@ ${nodes}\
 
         stateCandleModel(stock) {
             const code = this.normalizeCode(stock?.code || stock?.symbol);
-            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const selected = '5m';
             const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
             const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
             let bar = selectedBars[selectedBars.length - 1];
@@ -1030,7 +1038,10 @@ ${markers}\
             const H = Number(options.height) || 28;
             const limit = Number(options.limit) || 12;
             const title = this.chartTitle(chart, chart?.source || 'placeholder');
-            let points = this.chartPoints(chart).slice(-limit);
+            let points = this.chartPoints(chart);
+            if (chart?.sparkline_range !== 'today') {
+                points = points.slice(-limit);
+            }
             if (points.length === 0) {
                 const flat = this.chartFromQuote(options.price, options.change_pct);
                 points = this.chartPoints(flat).slice(-2);
@@ -1049,12 +1060,25 @@ ${markers}\
             const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(Number(p.p)).toFixed(1)}`).join(' ');
             const first = Number(points[0].p);
             const last = Number(points[points.length - 1].p);
-            const color = last >= first ? '#D81E26' : '#1A5CDD';
+            const baseline = Number(chart?.baseline);
+            const ref = Number.isFinite(baseline) && baseline > 0 ? baseline : first;
+            const color = last >= ref ? '#D81E26' : '#1A5CDD';
             return `\
 <svg class="mini-trend-line" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">\
 <title>${title}</title>\
 <path d="${path}" fill="none" stroke="${color}" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/>\
 </svg>`;
+        },
+
+        miniTrendLabel(stock) {
+            const chart = this.trendLineChart(stock);
+            if (!chart) return '데이터 부족';
+            if (chart.sparkline_range === 'today' && !chart.sparkline_is_fallback) {
+                return `Today ${chart.sparkline_tf || chart.interval || '5m'}`;
+            }
+            if (chart.sparkline_is_fallback) return 'recent';
+            if (chart.status === 'DATA_NA') return '데이터 부족';
+            return chart.interval || '5m';
         },
 
         chartBars(chart) {
@@ -1120,8 +1144,16 @@ ${markers}\
             const source = chart?.source || fallback || 'placeholder';
             const bars = Array.isArray(chart?.bars) ? chart.bars.length : 0;
             const points = Array.isArray(chart?.points) ? chart.points.length : 0;
-            if (bars > 0) return `chart source: ${source}, bars: ${bars}`;
-            if (points > 0) return `chart source: ${source}, points: ${points}`;
+            const range = chart?.sparkline_range || '';
+            const tf = chart?.sparkline_tf || chart?.interval || '';
+            const start = chart?.sparkline_start || '';
+            const end = chart?.sparkline_end || '';
+            const pct = Number(chart?.sparkline_change_pct_from_open ?? chart?.change_from_baseline_pct);
+            const pctStr = Number.isFinite(pct) ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '-';
+            const meta = [range, tf, source, start && `start ${start}`, end && `end ${end}`, `${points || bars}pts`, `open ${pctStr}`]
+                .filter(Boolean)
+                .join(' / ');
+            if (bars > 0 || points > 0) return `chart ${meta}`;
             return `chart source: ${source}`;
         },
 
@@ -1131,7 +1163,10 @@ ${markers}\
             if (chart.status !== 'OK') return `collecting · ${chart.point_count || 0}`;
             const pct = Number(chart.change_from_baseline_pct);
             const pctStr = Number.isFinite(pct) ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '-';
-            return `${chart.point_count}pts · ${pctStr}`;
+            const label = chart.sparkline_range === 'today'
+                ? `Today ${chart.sparkline_tf || chart.interval || '5m'}`
+                : (chart.sparkline_is_fallback ? 'recent' : (chart.interval || 'chart'));
+            return `${label} · ${chart.point_count}pts · ${pctStr}`;
         },
 
         _priceBaseline(price, changePct) {
@@ -1206,7 +1241,11 @@ ${markers}\
         stockChart(stock) {
             if (!stock) return null;
             const code = this.normalizeCode(stock.code || stock.symbol);
-            const selected = this.miniChartInterval === '5m' ? '5m' : '1m';
+            const serverChart = stock.sparkline || stock.price_chart || stock.chart;
+            if (serverChart && Array.isArray(serverChart.points) && serverChart.points.length >= 3) {
+                return serverChart;
+            }
+            const selected = '5m';
             const selectedBars = this.barSeriesByCode[code]?.[selected] || [];
             const oneMinuteBars = this.barSeriesByCode[code]?.['1m'] || [];
 
@@ -1214,12 +1253,12 @@ ${markers}\
                 return this.barChartForCode(code, selected, `bar_${selected}`);
             }
             if (selected === '5m' && selectedBars.length < 2 && oneMinuteBars.length > 0) {
-                return this.barChartForCode(code, '1m', 'fallback_1m');
+                return this.barChartForCode(code, '1m', 'fallback_recent');
             }
             if (selectedBars.length === 1) {
                 return this.barChartForCode(code, selected, 'fallback_single_bar');
             }
-            const oneMinuteFallback = selected !== '1m' ? this.barChartForCode(code, '1m', 'fallback_1m') : null;
+            const oneMinuteFallback = this.barChartForCode(code, '1m', 'fallback_recent');
             if (oneMinuteFallback) return oneMinuteFallback;
             const tickFallback = this.chartFromHistory('stocks', code);
             if (tickFallback) return tickFallback;
@@ -1248,14 +1287,14 @@ ${markers}\
         loadMiniChartInterval() {
             try {
                 const stored = localStorage.getItem('jc_mini_chart_interval');
-                this.miniChartInterval = stored === '5m' ? '5m' : '1m';
+                this.miniChartInterval = stored === 'today' || stored === '5m' ? '5m' : '5m';
             } catch (_) {
-                this.miniChartInterval = '1m';
+                this.miniChartInterval = '5m';
             }
         },
 
         setMiniChartInterval(interval) {
-            this.miniChartInterval = interval === '5m' ? '5m' : '1m';
+            this.miniChartInterval = '5m';
             try {
                 localStorage.setItem('jc_mini_chart_interval', this.miniChartInterval);
             } catch (_) {}

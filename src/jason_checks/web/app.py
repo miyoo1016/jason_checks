@@ -32,8 +32,14 @@ from jason_checks.kis_rest import (
     fetch_market_indices,
     fetch_index_investor_trend,
     fetch_current_price,
+    fetch_intraday_prices,
     fetch_overseas_price,
     KISClient,
+)
+from jason_checks.intraday_sparkline import (
+    build_fallback_sparkline,
+    build_today_sparkline,
+    fetch_naver_intraday_prices,
 )
 from jason_checks.supply_poller import run_selective_supply_poller
 from jason_checks.scanners.value_scanner import ValueScanner
@@ -341,6 +347,99 @@ def _quote_age_seconds(stock) -> int | None:
         return max(0, int((datetime.now() - datetime.fromisoformat(ts)).total_seconds()))
     except Exception:
         return None
+
+
+def _runtime_stock_sparkline(stock) -> dict | None:
+    return build_fallback_sparkline(
+        getattr(stock, "sparkline_points", {}) if stock else {},
+        price=float(getattr(stock, "price", 0) or 0),
+        change_pct=float(getattr(stock, "change_pct", 0) or 0),
+    )
+
+
+def _apply_sparkline_fields(row: dict, chart: dict | None) -> None:
+    if not chart:
+        return
+    row["sparkline"] = chart
+    row["price_chart"] = chart
+    row["chart"] = chart
+    row["sparkline_points"] = chart.get("sparkline_points") or chart.get("points") or []
+    row["sparkline_tf"] = chart.get("sparkline_tf") or chart.get("interval") or ""
+    row["sparkline_range"] = chart.get("sparkline_range") or ""
+    row["sparkline_start"] = chart.get("sparkline_start") or ""
+    row["sparkline_end"] = chart.get("sparkline_end") or ""
+    row["sparkline_source"] = chart.get("sparkline_source") or chart.get("source") or ""
+    row["sparkline_is_fallback"] = bool(chart.get("sparkline_is_fallback"))
+    row["sparkline_point_count"] = int(chart.get("sparkline_point_count") or chart.get("point_count") or 0)
+    row["sparkline_change_pct_from_open"] = chart.get("sparkline_change_pct_from_open")
+
+
+async def _today_sparkline_for_stock(app, code: str, stock, request_cache: dict[str, dict]) -> dict | None:
+    code = _normalize_symbol(code)
+    if not code:
+        return None
+    if code in request_cache:
+        return request_cache[code]
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache = getattr(app, "intraday_sparkline_cache", None)
+    if cache is None:
+        cache = {}
+        app.intraday_sparkline_cache = cache
+    cached = cache.get(code)
+    now_ts = datetime.now().timestamp()
+    if cached and cached.get("date") == today and now_ts - float(cached.get("cached_at", 0) or 0) < 300:
+        request_cache[code] = cached.get("chart")
+        return request_cache[code]
+
+    prev_close = None
+    price = float(getattr(stock, "price", 0) or 0)
+    change_pct = float(getattr(stock, "change_pct", 0) or 0)
+    if price > 0 and change_pct > -99.9:
+        prev_close = price / (1 + change_pct / 100)
+
+    chart = None
+    try:
+        raw_rows = await asyncio.wait_for(fetch_naver_intraday_prices(code), timeout=6.0)
+        chart = build_today_sparkline(
+            raw_rows,
+            prev_close=prev_close,
+            interval_minutes=5,
+            max_points=80,
+            source="naver_intraday",
+        )
+        if chart.get("status") != "OK":
+            chart = None
+    except Exception as e:
+        logger.warning("today_sparkline_naver_failed", code=code, error=str(e))
+
+    if not chart:
+        try:
+            raw_rows = await asyncio.wait_for(fetch_intraday_prices(code, max_pages=16), timeout=12.0)
+            chart = build_today_sparkline(
+                raw_rows,
+                prev_close=prev_close,
+                interval_minutes=5,
+                max_points=80,
+                source="kis_intraday",
+            )
+            if chart.get("status") != "OK":
+                chart = None
+        except Exception as e:
+            logger.warning("today_sparkline_kis_failed", code=code, error=str(e))
+
+    if not chart:
+        chart = _runtime_stock_sparkline(stock)
+        if chart:
+            chart["sparkline_is_fallback"] = True
+            chart["sparkline_range"] = chart.get("sparkline_range") or "recent"
+            chart["sparkline_tf"] = chart.get("sparkline_tf") or "fallback"
+            chart["trend_label"] = "recent" if chart.get("source") != "fallback_quote" else "fallback"
+
+    if chart:
+        cache[code] = {"date": today, "cached_at": now_ts, "chart": chart}
+    request_cache[code] = chart
+    return chart
 
 
 def _run_dashboard_decision_engine_cached(
@@ -1494,6 +1593,7 @@ def create_app() -> FastAPI:
         stock_ticks = {}
         for code, stock in app_state.stocks.items():
             norm_code = _normalize_symbol(code)
+            fallback_chart = _runtime_stock_sparkline(stock)
             stock_ticks[norm_code] = {
                 "price": stock.price,
                 "change_pct": stock.change_pct,
@@ -1513,14 +1613,11 @@ def create_app() -> FastAPI:
                 "supply_date": stock.supply_date,
                 "supply_error": stock.supply_error,
                 "updated_at": stock.last_tick_ts.isoformat(),
-                "sparkline": {
-                    "status": "OK" if len(stock.sparkline_points) >= 2 else "collecting",
-                    "points": [{"t": t, "p": p} for t, p in sorted(stock.sparkline_points.items())],
-                    "baseline": stock.price / (1 + stock.change_pct / 100) if stock.change_pct > -99.9 and stock.price > 0 else stock.price,
-                } if stock.sparkline_points else None
+                "sparkline": fallback_chart,
             }
 
         themes_result = {}
+        request_sparkline_cache: dict[str, dict] = {}
         for theme_code in active_themes:
             theme_config = app.theme_data.get(theme_code, {})
             leaders = select_leaders(theme_code, stock_ticks, app.theme_data, sort_mode=sort)
@@ -1556,6 +1653,8 @@ def create_app() -> FastAPI:
                 }
                 if code_norm in stock_ticks:
                     ld.update(stock_ticks[code_norm])
+                chart = await _today_sparkline_for_stock(app, code_norm, app_state.stocks.get(code_norm), request_sparkline_cache)
+                _apply_sparkline_fields(ld, chart)
                 leader_list.append(ld)
 
             themes_result[theme_code] = {
@@ -1607,6 +1706,8 @@ def create_app() -> FastAPI:
                 }
                 if code_norm in stock_ticks:
                     ld.update(stock_ticks[code_norm])
+                chart = await _today_sparkline_for_stock(app, code_norm, app_state.stocks.get(code_norm), request_sparkline_cache)
+                _apply_sparkline_fields(ld, chart)
 
                 app_stock = app_state.stocks.get(code_norm)
                 app_state_price = app_stock.price if app_stock else 0.0

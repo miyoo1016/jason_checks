@@ -295,6 +295,75 @@ async def fetch_current_price(code: str) -> dict:
             logger.warning("price_exception", code=code, market=mrkt, error=str(e))
     return None
 
+
+async def fetch_intraday_prices(code: str, *, cursor_hhmmss: str | None = None, max_pages: int = 8) -> list[dict]:
+    """Fetch today's domestic intraday rows for sparkline display only.
+
+    Uses KIS inquire-time-itemchartprice. The caller aggregates/downsamples; this
+    function intentionally does not affect quote, score, supply, or gate logic.
+    """
+    settings = get_settings()
+    app_key, app_secret, _ = get_active_credentials()
+    rest_url, _ = get_urls(settings.kis_mode)
+    token = await get_access_token()
+
+    now = datetime.now()
+    cursor = cursor_hhmmss or min(now.replace(second=0, microsecond=0), now.replace(hour=15, minute=30, second=0, microsecond=0)).strftime("%H%M%S")
+    url = f"{rest_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST03010200",
+        "custtype": "P",
+    }
+    rows_by_key: dict[tuple[str, str], dict] = {}
+    oldest_time = cursor
+
+    for _ in range(max_pages):
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+            "FID_INPUT_HOUR_1": oldest_time,
+            "FID_PW_DATA_INCU_YN": "Y",
+        }
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.get(url, headers=headers, params=params, timeout=5.0)
+            if resp.status_code != 200:
+                break
+            payload = resp.json()
+            if payload.get("rt_cd") != "0":
+                break
+            output = payload.get("output2") or payload.get("output") or []
+            if not isinstance(output, list) or not output:
+                break
+            added = 0
+            page_oldest = oldest_time
+            for item in output:
+                date_s = str(item.get("stck_bsop_date") or "").strip()
+                time_s = str(item.get("stck_cntg_hour") or "").strip().zfill(6)[:6]
+                price_s = str(item.get("stck_prpr") or "").replace(",", "").strip()
+                if not date_s or not time_s or not price_s:
+                    continue
+                key = (date_s, time_s)
+                if key not in rows_by_key:
+                    rows_by_key[key] = item
+                    added += 1
+                if time_s < page_oldest:
+                    page_oldest = time_s
+            if added == 0 or page_oldest >= oldest_time or page_oldest <= "090000":
+                break
+            oldest_time = page_oldest
+            await asyncio.sleep(0.18)
+        except Exception as e:
+            logger.warning("intraday_sparkline_fetch_failed", code=code, error=str(e))
+            break
+
+    return [rows_by_key[k] for k in sorted(rows_by_key.keys())]
+
 async def fetch_overseas_price(ticker: str) -> dict:
     """Fetch overseas (US) current price via HHDFS00000300.
 
